@@ -15,23 +15,19 @@ import time
 from pathlib import Path
 
 from PySide6.QtCore import QMimeData, QObject, QTimer, QUrl, Signal
-from PySide6.QtGui import QAction, QIcon
-from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon, QMessageBox
+from PySide6.QtGui import QAction, QIcon, QImage
+from PySide6.QtWidgets import QApplication, QDialog, QMenu, QSystemTrayIcon
 
+from zumly_capture.capture_ui import RegionSelector, WindowPickerDialog
 from zumly_capture.identity import FILE_PREFIX, PRODUCT_NAME
+from zumly_capture.screenshot import foreground_window_handle, publish_screenshot
+from zumly_capture.settings import load_settings, save_settings
+from zumly_capture.settings_dialog import CaptureSettingsDialog
 
-from .widgets.unified_settings_dialog import (
-    UnifiedSettingsDialog,
-    load_ai_settings,
-    load_export_settings,
-    load_general_config,
-    save_ai_settings,
-    save_export_settings,
-    save_general_config,
-)
-from .credentials import DPAPIEncryptionError
 from .icon_loader import get_brand_icon
+from .screen_recorder import ScreenRecorder
 from .session_timing import RecordingState
+from .window_utils import enumerate_windows, get_window_rect
 
 logger = logging.getLogger("zumly_capture.tray")
 
@@ -45,14 +41,47 @@ VK_R = 0x52
 VK_P = 0x50
 HOTKEY_RECORD_ID = 9901
 HOTKEY_PAUSE_ID = 9902
+HOTKEY_SCREENSHOT_ID = 9903
+
+
+def _parse_hotkey(value: str) -> tuple[int, int]:
+    """Translate a portable Qt shortcut into RegisterHotKey values."""
+    parts = [part.strip() for part in str(value).split("+") if part.strip()]
+    if not parts:
+        raise ValueError("Shortcut cannot be empty")
+    modifiers = 0
+    key_name = parts[-1].upper()
+    for part in parts[:-1]:
+        name = part.lower()
+        if name in {"ctrl", "control"}:
+            modifiers |= MOD_CONTROL
+        elif name == "shift":
+            modifiers |= MOD_SHIFT
+        elif name == "alt":
+            modifiers |= 0x0001
+        elif name in {"win", "meta"}:
+            modifiers |= 0x0008
+        else:
+            raise ValueError(f"Unsupported shortcut modifier: {part}")
+    if len(key_name) == 1 and key_name.isalnum():
+        virtual_key = ord(key_name)
+    elif key_name.startswith("F") and key_name[1:].isdigit():
+        number = int(key_name[1:])
+        if not 1 <= number <= 24:
+            raise ValueError(f"Unsupported function key: {key_name}")
+        virtual_key = 0x70 + number - 1
+    else:
+        raise ValueError(f"Unsupported shortcut key: {key_name}")
+    return modifiers, virtual_key
 
 
 class _HotkeyThread(threading.Thread):
     """Register recording shortcuts without blocking the Qt event loop."""
 
-    def __init__(self, callback):
+    def __init__(self, callback, shortcuts: dict[int, str]):
         super().__init__(daemon=True, name="TrayHotkey")
         self._callback = callback
+        self._shortcuts = dict(shortcuts)
         self._thread_id = 0
         self._ready = threading.Event()
 
@@ -60,10 +89,17 @@ class _HotkeyThread(threading.Thread):
         user32 = ctypes.windll.user32
         kernel32 = ctypes.windll.kernel32
         self._thread_id = kernel32.GetCurrentThreadId()
-        if not user32.RegisterHotKey(None, HOTKEY_RECORD_ID, MOD_CONTROL | MOD_SHIFT, VK_R):
-            logger.warning("Could not register Ctrl+Shift+R")
-        if not user32.RegisterHotKey(None, HOTKEY_PAUSE_ID, MOD_CONTROL | MOD_SHIFT, VK_P):
-            logger.warning("Could not register Ctrl+Shift+P")
+        registered: list[int] = []
+        for hotkey_id, shortcut in self._shortcuts.items():
+            try:
+                modifiers, virtual_key = _parse_hotkey(shortcut)
+            except ValueError as exc:
+                logger.warning("Invalid shortcut %s: %s", shortcut, exc)
+                continue
+            if user32.RegisterHotKey(None, hotkey_id, modifiers, virtual_key):
+                registered.append(hotkey_id)
+            else:
+                logger.warning("Could not register shortcut %s", shortcut)
         self._ready.set()
 
         message = wintypes.MSG()
@@ -71,10 +107,11 @@ class _HotkeyThread(threading.Thread):
             if message.message == WM_HOTKEY and message.wParam in {
                 HOTKEY_RECORD_ID,
                 HOTKEY_PAUSE_ID,
+                HOTKEY_SCREENSHOT_ID,
             }:
                 self._callback(int(message.wParam))
-        user32.UnregisterHotKey(None, HOTKEY_RECORD_ID)
-        user32.UnregisterHotKey(None, HOTKEY_PAUSE_ID)
+        for hotkey_id in registered:
+            user32.UnregisterHotKey(None, hotkey_id)
 
     def stop(self) -> None:
         if self._thread_id:
@@ -87,6 +124,7 @@ class QtZumlyCaptureTray(QObject):
 
     toggle_requested = Signal()
     pause_toggle_requested = Signal()
+    screenshot_requested = Signal()
     recording_finished = Signal(object, int)
     engine_state_changed = Signal(str, int)
 
@@ -106,9 +144,12 @@ class QtZumlyCaptureTray(QObject):
         self._result_file = ""
         self._command_sequence = 0
         self._ack_sequence = -1
-        self._cfg = load_general_config()
+        self._cfg = load_settings()
         self._last_capture_path = ""
         self._settings_dialog = None
+        self._region_selector: RegionSelector | None = None
+        self._countdown_timer: QTimer | None = None
+        self._pending_record_target: dict | None = None
         self._tray_icon: QSystemTrayIcon | None = None
         self._idle_tray_icon: QIcon | None = None
         self._recording_tray_icon: QIcon | None = None
@@ -121,15 +162,14 @@ class QtZumlyCaptureTray(QObject):
         self.recording_finished.connect(self._handle_recording_finished)
         self.toggle_requested.connect(self._on_toggle)
         self.pause_toggle_requested.connect(self._on_pause_toggle)
+        self.screenshot_requested.connect(self._screenshot_monitor)
         self.engine_state_changed.connect(self._handle_engine_state)
 
     def run(self) -> None:
         """Create the tray menu and return control to QApplication.exec()."""
         os.makedirs(self._cfg["output_folder"], exist_ok=True)
         self._initialize_tray_ui()
-        self._hotkey_thread = _HotkeyThread(self._dispatch_hotkey)
-        self._hotkey_thread.start()
-        self._hotkey_thread._ready.wait(timeout=2.0)
+        self._start_hotkey_thread()
         if self._instance_guard is not None:
             self._activation_timer = QTimer(self)
             self._activation_timer.setInterval(100)
@@ -179,6 +219,28 @@ class QtZumlyCaptureTray(QObject):
         self._pause_action.triggered.connect(self._on_pause_toggle)
         menu.addAction(self._pause_action)
 
+        screenshot_menu = menu.addMenu("Take Screenshot")
+        screenshot_monitor = QAction("Full Monitor", self)
+        screenshot_monitor.triggered.connect(self._screenshot_monitor)
+        screenshot_menu.addAction(screenshot_monitor)
+        screenshot_window = QAction("Active Window", self)
+        screenshot_window.triggered.connect(self._screenshot_active_window)
+        screenshot_menu.addAction(screenshot_window)
+        screenshot_region = QAction("Select Region", self)
+        screenshot_region.triggered.connect(self._screenshot_region)
+        screenshot_menu.addAction(screenshot_region)
+
+        recording_menu = menu.addMenu("Record")
+        record_monitor = QAction("Full Monitor", self)
+        record_monitor.triggered.connect(self._record_monitor)
+        recording_menu.addAction(record_monitor)
+        record_window = QAction("Choose Window…", self)
+        record_window.triggered.connect(self._record_window)
+        recording_menu.addAction(record_window)
+        record_region = QAction("Select Region…", self)
+        record_region.triggered.connect(self._record_region)
+        recording_menu.addAction(record_region)
+
         menu.addSeparator()
         self._open_capture_action = QAction("Open Last Capture", self)
         self._open_capture_action.setEnabled(False)
@@ -212,11 +274,16 @@ class QtZumlyCaptureTray(QObject):
     def _dispatch_hotkey(self, hotkey_id: int) -> None:
         if hotkey_id == HOTKEY_PAUSE_ID:
             self.pause_toggle_requested.emit()
+        elif hotkey_id == HOTKEY_SCREENSHOT_ID:
+            self.screenshot_requested.emit()
         elif hotkey_id == HOTKEY_RECORD_ID:
             self.toggle_requested.emit()
 
     def _on_toggle(self, _checked: bool = False) -> None:
         if self._stopping:
+            return
+        if self._state == RecordingState.STARTING and self._process is None:
+            self._cancel_countdown()
             return
         if self._state in {RecordingState.RECORDING, RecordingState.PAUSED} or self._recording:
             self._stop_recording()
@@ -236,36 +303,43 @@ class QtZumlyCaptureTray(QObject):
             self._settings_dialog.raise_()
             self._settings_dialog.activateWindow()
             return
-        self._settings_dialog = UnifiedSettingsDialog(
-            self._cfg,
-            load_ai_settings(),
-            load_export_settings(),
-        )
-        self._settings_dialog.settings_saved.connect(self._save_unified_settings)
+        self._settings_dialog = CaptureSettingsDialog(self._cfg)
+        self._settings_dialog.settings_saved.connect(self._save_capture_settings)
         self._settings_dialog.show()
         self._settings_dialog.raise_()
         self._settings_dialog.activateWindow()
 
-    def _save_unified_settings(
-        self,
-        general_config: dict,
-        ai_settings: object,
-        export_settings: dict,
-    ) -> None:
+    def _save_capture_settings(self, settings: object) -> None:
         try:
-            save_ai_settings(ai_settings)
-            save_general_config(general_config)
-            save_export_settings(export_settings)
-        except (DPAPIEncryptionError, ValueError) as exc:
+            if not isinstance(settings, dict):
+                raise ValueError("Capture settings must be an object")
+            self._cfg = save_settings(settings)
+        except (OSError, ValueError) as exc:
             logger.error("Settings save rejected: %s", exc)
-            QMessageBox.critical(
-                self._settings_dialog,
-                "Settings not saved",
-                str(exc),
-            )
+            self._notify(f"Settings were not saved: {exc}")
             return
-        self._cfg = general_config
-        logger.info("General, AI, and export settings saved")
+        self._restart_hotkey_thread()
+        logger.info("Capture settings saved")
+
+    def _start_hotkey_thread(self) -> None:
+        if self._hotkey_thread is not None:
+            return
+        shortcuts = {
+            HOTKEY_RECORD_ID: str(self._cfg.get("record_hotkey", "Ctrl+Shift+R")),
+            HOTKEY_PAUSE_ID: str(self._cfg.get("pause_hotkey", "Ctrl+Shift+P")),
+            HOTKEY_SCREENSHOT_ID: str(
+                self._cfg.get("screenshot_hotkey", "Ctrl+Shift+S")
+            ),
+        }
+        self._hotkey_thread = _HotkeyThread(self._dispatch_hotkey, shortcuts)
+        self._hotkey_thread.start()
+        self._hotkey_thread._ready.wait(timeout=2.0)
+
+    def _restart_hotkey_thread(self) -> None:
+        if self._hotkey_thread is not None:
+            self._hotkey_thread.stop()
+            self._hotkey_thread = None
+        self._start_hotkey_thread()
 
     def _capture_is_available(self) -> bool:
         available = bool(self._last_capture_path and os.path.isfile(self._last_capture_path))
@@ -315,7 +389,123 @@ class QtZumlyCaptureTray(QObject):
             logger.error("Could not reveal capture: %s", exc)
             self._notify("Could not show the last capture in its folder")
 
+    def _monitor_rect(self, monitor_index: int | None = None) -> dict | None:
+        selected = int(monitor_index or self._cfg.get("monitor", 1))
+        for monitor in ScreenRecorder.get_monitors():
+            if int(monitor.get("index", 0)) == selected:
+                return dict(monitor)
+        return None
+
+    def _next_output_path(self, folder: str, extension: str) -> str:
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        millis = int(time.time_ns() // 1_000_000) % 1000
+        stem = f"{FILE_PREFIX}_{timestamp}_{millis:03d}"
+        candidate = os.path.join(folder, f"{stem}.{extension}")
+        suffix = 1
+        while os.path.exists(candidate):
+            candidate = os.path.join(folder, f"{stem}_{suffix}.{extension}")
+            suffix += 1
+        return candidate
+
+    def _capture_screenshot(self, rect: dict) -> None:
+        self._cfg = load_settings()
+        folder = str(self._cfg["screenshot_folder"])
+        os.makedirs(folder, exist_ok=True)
+        image_format = str(self._cfg.get("screenshot_format", "png"))
+        extension = "jpg" if image_format == "jpg" else "png"
+        output_path = self._next_output_path(folder, extension)
+        try:
+            saved_path = publish_screenshot(rect, output_path, image_format)
+        except Exception as exc:
+            logger.exception("Screenshot failed: %s", exc)
+            self._notify(f"Screenshot failed: {exc}")
+            return
+        self._last_capture_path = saved_path
+        self._set_capture_actions_enabled(True)
+        if self._cfg.get("copy_screenshot", True):
+            image = QImage(saved_path)
+            if not image.isNull():
+                self._app.clipboard().setImage(image)
+        self._notify(f"Screenshot saved: {os.path.basename(saved_path)}")
+
+    def _schedule_screenshot(self, rect: dict) -> None:
+        delay = int(self._cfg.get("screenshot_delay_seconds", 0) or 0)
+        if delay > 0:
+            self._notify(f"Screenshot in {delay} seconds…")
+            QTimer.singleShot(delay * 1000, lambda: self._capture_screenshot(rect))
+        else:
+            QTimer.singleShot(120, lambda: self._capture_screenshot(rect))
+
+    def _screenshot_monitor(self, _checked: bool = False) -> None:
+        rect = self._monitor_rect()
+        if rect is None:
+            self._notify("The configured monitor is not available")
+            return
+        self._schedule_screenshot(rect)
+
+    def _screenshot_active_window(self, _checked: bool = False) -> None:
+        handle = foreground_window_handle()
+        rect = get_window_rect(handle) if handle else None
+        if rect is None:
+            self._notify("Could not identify the active window")
+            return
+        self._schedule_screenshot(rect)
+
+    def _select_region(self, callback) -> None:
+        if self._region_selector is not None:
+            self._region_selector.close()
+        selector = RegionSelector()
+        self._region_selector = selector
+
+        def selected(rect: object) -> None:
+            self._region_selector = None
+            selector.deleteLater()
+            if isinstance(rect, dict):
+                callback(dict(rect))
+
+        def cancelled() -> None:
+            self._region_selector = None
+            selector.deleteLater()
+
+        selector.region_selected.connect(selected)
+        selector.cancelled.connect(cancelled)
+        selector.begin()
+
+    def _screenshot_region(self, _checked: bool = False) -> None:
+        self._select_region(self._schedule_screenshot)
+
+    def _record_monitor(self, _checked: bool = False) -> None:
+        self._begin_recording(
+            {"kind": "monitor", "monitorIndex": int(self._cfg.get("monitor", 1))}
+        )
+
+    def _record_window(self, _checked: bool = False) -> None:
+        windows = enumerate_windows()
+        if not windows:
+            self._notify("No recordable windows were found")
+            return
+        dialog = WindowPickerDialog(windows, "Record a Window")
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        selected = dialog.selected_window()
+        if selected:
+            self._begin_recording(
+                {
+                    "kind": "window",
+                    "windowHandle": int(selected["hwnd"]),
+                    "windowTitle": str(selected.get("title", "")),
+                }
+            )
+
+    def _record_region(self, _checked: bool = False) -> None:
+        self._select_region(
+            lambda rect: self._begin_recording({"kind": "region", **rect})
+        )
+
     def _start_recording(self) -> None:
+        self._record_monitor()
+
+    def _begin_recording(self, target: dict) -> None:
         if self._state in {
             RecordingState.STARTING,
             RecordingState.RECORDING,
@@ -324,19 +514,51 @@ class QtZumlyCaptureTray(QObject):
         }:
             return
         self._state = RecordingState.STARTING
-        self._cfg = load_general_config()
+        self._pending_record_target = dict(target)
+        seconds = int(self._cfg.get("countdown_seconds", 0) or 0)
+        if seconds <= 0:
+            self._launch_recording()
+            return
+        self._countdown_remaining = seconds
+        self._update_tray(f"Recording starts in {seconds}…")
+        self._countdown_timer = QTimer(self)
+        self._countdown_timer.setInterval(1000)
+        self._countdown_timer.timeout.connect(self._countdown_tick)
+        self._countdown_timer.start()
+
+    def _countdown_tick(self) -> None:
+        self._countdown_remaining -= 1
+        if self._countdown_remaining <= 0:
+            if self._countdown_timer is not None:
+                self._countdown_timer.stop()
+                self._countdown_timer.deleteLater()
+                self._countdown_timer = None
+            self._launch_recording()
+            return
+        self._update_tray(f"Recording starts in {self._countdown_remaining}…")
+
+    def _cancel_countdown(self) -> None:
+        if self._countdown_timer is not None:
+            self._countdown_timer.stop()
+            self._countdown_timer.deleteLater()
+            self._countdown_timer = None
+        self._pending_record_target = None
+        self._state = RecordingState.IDLE
+        self._update_tray("Ready (Ctrl+Shift+R)")
+        self._notify("Recording countdown cancelled")
+
+    def _launch_recording(self) -> None:
+        if self._process is not None or self._recording:
+            return
+        target = dict(
+            self._pending_record_target
+            or {"kind": "monitor", "monitorIndex": int(self._cfg.get("monitor", 1))}
+        )
+        self._pending_record_target = None
+        self._state = RecordingState.STARTING
+        self._cfg = load_settings()
         os.makedirs(self._cfg["output_folder"], exist_ok=True)
-        timestamp = time.strftime("%Y%m%d_%H%M%S")
-        millis = int(time.time_ns() // 1_000_000) % 1000
-        stem = f"{FILE_PREFIX}_{timestamp}_{millis:03d}"
-        out_path = os.path.join(self._cfg["output_folder"], f"{stem}.mp4")
-        suffix = 1
-        while os.path.exists(out_path):
-            out_path = os.path.join(
-                self._cfg["output_folder"],
-                f"{stem}_{suffix}.mp4",
-            )
-            suffix += 1
+        out_path = self._next_output_path(self._cfg["output_folder"], "mp4")
 
         if getattr(sys, "frozen", False):
             command = [sys.executable, "--headless-engine"]
@@ -344,9 +566,27 @@ class QtZumlyCaptureTray(QObject):
             command = [sys.executable, "-m", "zumly.main"]
         command += [
             "--out", out_path,
-            "--monitor", str(self._cfg.get("monitor", 1)),
+            "--monitor", str(target.get("monitorIndex", self._cfg.get("monitor", 1))),
             "--fps", str(self._cfg.get("fps", 60)),
+            "--target-kind", str(target.get("kind", "monitor")),
         ]
+        if target.get("kind") == "window":
+            command += ["--window-hwnd", str(target.get("windowHandle", 0))]
+            command += ["--window-title", str(target.get("windowTitle", ""))]
+        elif target.get("kind") == "region":
+            command += [
+                "--region",
+                str(target.get("left", 0)),
+                str(target.get("top", 0)),
+                str(target.get("width", 0)),
+                str(target.get("height", 0)),
+            ]
+        microphone = str(self._cfg.get("microphone_device", "") or "")
+        system_audio = str(self._cfg.get("system_audio_device", "") or "")
+        if microphone:
+            command += ["--microphone", microphone]
+        if system_audio:
+            command += ["--system-audio", system_audio]
 
         self._stop_file = os.path.join(
             tempfile.gettempdir(),
@@ -614,11 +854,7 @@ class QtZumlyCaptureTray(QObject):
         self._reregister_hotkey()
 
     def _reregister_hotkey(self) -> None:
-        if self._hotkey_thread is not None:
-            return
-        self._hotkey_thread = _HotkeyThread(self._dispatch_hotkey)
-        self._hotkey_thread.start()
-        self._hotkey_thread._ready.wait(timeout=2.0)
+        self._start_hotkey_thread()
 
     def _update_tray(self, title: str) -> None:
         if self._tray_icon is not None:

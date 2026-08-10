@@ -25,7 +25,7 @@ from typing import Any, Optional, List, TYPE_CHECKING, Callable
 
 # Windows Graphics Capture API (hardware-accelerated capture)
 try:
-    from windows_capture import WindowsCapture, Frame, InternalCaptureControl
+    from zumly_capture.wgc import WindowsCapture, Frame, InternalCaptureControl
     _HAS_WGC = True
 except ImportError:
     _HAS_WGC = False
@@ -276,7 +276,6 @@ class _PooledBgraFrame:
         "_pool",
         "_storage",
         "_view",
-        "_array",
         "_leased",
         "width",
         "height",
@@ -288,16 +287,6 @@ class _PooledBgraFrame:
         self.height = int(height)
         self._storage = bytearray(self.width * self.height * 4)
         self._view = memoryview(self._storage)
-        # windows-capture exposes padded D3D rows as a strided NumPy view at
-        # some resolutions. Keep one ndarray header per pooled allocation so
-        # np.copyto can repack those rows in C without allocating a frame.
-        import numpy as np
-
-        self._array = np.frombuffer(self._storage, dtype=np.uint8).reshape(
-            self.height,
-            self.width,
-            4,
-        )
         self._leased = False
 
     @property
@@ -309,6 +298,9 @@ class _PooledBgraFrame:
         return self._view
 
     def copy_from(self, source: Any) -> bool:
+        copy_into = getattr(source, "copy_into", None)
+        if callable(copy_into):
+            return bool(copy_into(self._view, self.width, self.height))
         try:
             source_view = memoryview(source)
         except (TypeError, ValueError, BufferError):
@@ -322,15 +314,7 @@ class _PooledBgraFrame:
             except (TypeError, ValueError, BufferError):
                 return False
 
-        try:
-            import numpy as np
-
-            if getattr(source, "shape", None) != self.shape:
-                return False
-            np.copyto(self._array, source, casting="no")
-            return True
-        except (TypeError, ValueError):
-            return False
+        return False
 
     def release(self) -> None:
         self._pool.release(self)
@@ -525,8 +509,9 @@ class ScreenRecorder:
         self._recording_duration_ms: float = 0.0
         self._lock = threading.Lock()
         # window capture mode
-        self._capture_mode: str = "monitor"  # "monitor" | "window"
+        self._capture_mode: str = "monitor"  # "monitor" | "window" | "region"
         self._window_hwnd: int = 0
+        self._region_rect: dict[str, int] = {}
         self._initial_size: tuple = (0, 0)
         self._backend: str = ""  # set once capture starts
         # WGC callback -> writer handoff. A FIFO keeps short encoder stalls
@@ -732,6 +717,31 @@ class ScreenRecorder:
         else:
             self._initial_size = (0, 0)
         self._thread = threading.Thread(target=self._capture_loop_window, daemon=True)
+        self._thread.start()
+
+    def start_capture_region(self, rect: dict, fps: int = 60) -> None:
+        """Start a lightweight GDI capture of a fixed physical-pixel region."""
+        self.stop_capture()
+        width = max(2, int(rect.get("width", 0)))
+        height = max(2, int(rect.get("height", 0)))
+        width -= width % 2
+        height -= height % 2
+        self._capture_mode = "region"
+        self._region_rect = {
+            "left": int(rect.get("left", 0)),
+            "top": int(rect.get("top", 0)),
+            "width": width,
+            "height": height,
+        }
+        self._initial_size = (width, height)
+        self._fps = fps
+        self._capture_stop_event.clear()
+        self._scheduler_wake_event.clear()
+        self._capture_pipeline_ready_event.clear()
+        with self._lock:
+            self._capturing = True
+            self._recording = False
+        self._thread = threading.Thread(target=self._capture_loop_region, daemon=True)
         self._thread.start()
 
     def prepare_recording(self) -> str:
@@ -1184,7 +1194,8 @@ class ScreenRecorder:
             cursor_capture=False,   # we render our own cursor in export
             draw_border=False,
             monitor_index=monitor_index,
-            window_name=window_name,
+            window_name=None,
+            window_hwnd=window_hwnd,
         )
         capture.frame_handler = _on_frame
         capture.closed_handler = _on_closed
@@ -1487,7 +1498,6 @@ class ScreenRecorder:
 
     def _capture_loop_mss(self) -> None:
         """GDI-based monitor capture via mss (fallback)."""
-        import numpy as np
         import mss
         # mss feeds a best-effort capture loop. It is intentionally not allowed
         # to opt into WGC's validated CFR timing path.
@@ -1551,23 +1561,22 @@ class ScreenRecorder:
 
                     # grab frame (BGRA from mss)
                     img = sct.grab(monitor)
-                    frame = np.asarray(img)
+                    frame_bytes = img.bgra
 
                     if was_recording and is_recording:
                         with self._lock:
                             self._frames_captured += 1
                         if writer_proc and writer_proc.stdin and not writer_proc.stdin.closed:
                             try:
-                                frame_view = _bgra_frame_view(frame)
                                 expected = w * h * 4
-                                if frame_view is None or frame_view.nbytes != expected:
+                                if len(frame_bytes) != expected:
                                     self._record_dimension_drop(
-                                        frame.shape[1], frame.shape[0], w, h,
+                                        img.width, img.height, w, h,
                                         count_as_source=False,
                                     )
                                 else:
                                     write_started = time.perf_counter()
-                                    writer_proc.stdin.write(frame_view)
+                                    writer_proc.stdin.write(frame_bytes)
                                     self._record_writer_write(
                                         (time.perf_counter() - write_started) * 1000.0
                                     )
@@ -1606,8 +1615,6 @@ class ScreenRecorder:
 
     def _capture_loop_window(self) -> None:
         """Capture loop for a specific window — prefers WGC, falls back to mss."""
-        import numpy as np
-        import mss
         if _winmm:
             _winmm.timeBeginPeriod(1)
         try:
@@ -1621,6 +1628,7 @@ class ScreenRecorder:
                     self._capture_pipeline_ready_event.set()
 
             # ── GDI fallback for window capture ───────────────────
+            import mss
             from .window_utils import get_window_rect
 
             self._backend = "GDI"
@@ -1707,7 +1715,7 @@ class ScreenRecorder:
                         "height": rect["height"],
                     }
                     img = sct.grab(monitor)
-                    frame = np.asarray(img)
+                    frame_bytes = img.bgra
                     cw, ch = rect["width"], rect["height"]
 
                     if was_recording and is_recording:
@@ -1717,15 +1725,14 @@ class ScreenRecorder:
                             with self._lock:
                                 self._frames_captured += 1
                             try:
-                                frame_view = _bgra_frame_view(frame)
                                 expected = w * h * 4
-                                if frame_view is None or frame_view.nbytes != expected:
+                                if len(frame_bytes) != expected:
                                     self._record_dimension_drop(
                                         cw, ch, w, h, count_as_source=False,
                                     )
                                 else:
                                     write_started = time.perf_counter()
-                                    writer_proc.stdin.write(frame_view)
+                                    writer_proc.stdin.write(frame_bytes)
                                     self._record_writer_write(
                                         (time.perf_counter() - write_started) * 1000.0
                                     )
@@ -1755,6 +1762,115 @@ class ScreenRecorder:
         except Exception as exc:
             self._mark_recording_failed(f"GDI window capture error: {exc}")
         finally:
+            self._capture_pipeline_ready_event.set()
+            self._recording_finalized_event.set()
+            self._register_writer_process(None)
+            if _winmm:
+                _winmm.timeEndPeriod(1)
+
+    def _capture_loop_region(self) -> None:
+        """Capture a fixed region without NumPy or Python frame transforms."""
+        import mss
+
+        if _winmm:
+            _winmm.timeBeginPeriod(1)
+        writer_proc: Optional[subprocess.Popen] = None
+        was_recording = False
+        try:
+            self._backend = "GDI"
+            with self._lock:
+                self._is_cfr = False
+                self._validation_error = "GDI region capture is not CFR-validated"
+            if self._capture_backend_changed_cb:
+                self._capture_backend_changed_cb("GDI")
+            rect = dict(self._region_rect)
+            width, height = rect["width"], rect["height"]
+            encoder_name, _ = _capture_encoder_args(_ffmpeg_exe())
+            record_fps = _capture_record_fps(self._fps, encoder_name)
+            with self._lock:
+                self._target_fps = record_fps
+                self._capture_encoder = encoder_name
+            self._capture_pipeline_ready_event.set()
+
+            with mss.mss() as capture:
+                while self.is_capturing:
+                    started = time.perf_counter()
+                    with self._lock:
+                        state = self._timeline_clock.state
+                        session_open = self._recording and state in {
+                            RecordingState.RECORDING,
+                            RecordingState.PAUSED,
+                        }
+                        is_recording = state == RecordingState.RECORDING
+                        output_path = self._output_path
+
+                    if state == RecordingState.PAUSED and not was_recording:
+                        self._timeline_clock.wait_until_active(timeout=0.05)
+                        continue
+                    if session_open and not was_recording:
+                        writer_proc = _start_ffmpeg_writer(
+                            output_path, width, height, record_fps
+                        )
+                        self._register_writer_process(writer_proc)
+                        if writer_proc is None:
+                            raise RuntimeError("FFmpeg writer failed for region capture")
+                        was_recording = True
+                    elif not session_open and was_recording:
+                        _stop_ffmpeg_writer(writer_proc)
+                        writer_proc = None
+                        self._timeline_clock.finish()
+                        self._recording_finalized_event.set()
+                        if self._recording_finished_cb:
+                            self._recording_finished_cb(output_path)
+                        was_recording = False
+
+                    if state == RecordingState.PAUSED:
+                        self._timeline_clock.wait_until_active(timeout=0.05)
+                        continue
+
+                    frame_bytes = capture.grab(rect).bgra
+                    if was_recording and is_recording and writer_proc and writer_proc.stdin:
+                        with self._lock:
+                            self._frames_captured += 1
+                        expected = width * height * 4
+                        if len(frame_bytes) != expected:
+                            self._record_dimension_drop(
+                                width, height, width, height, count_as_source=False
+                            )
+                        else:
+                            try:
+                                write_started = time.perf_counter()
+                                writer_proc.stdin.write(frame_bytes)
+                                self._record_writer_write(
+                                    (time.perf_counter() - write_started) * 1000.0
+                                )
+                                with self._lock:
+                                    self._frame_timestamps.append(
+                                        self._timeline_clock.active_time_ms()
+                                    )
+                                    self._frame_count += 1
+                                    self._frames_written += 1
+                            except (BrokenPipeError, OSError) as exc:
+                                _stop_ffmpeg_writer(writer_proc)
+                                writer_proc = None
+                                self._mark_recording_failed(
+                                    f"GDI region FFmpeg writer stopped: {exc}"
+                                )
+                                was_recording = False
+
+                    elapsed = time.perf_counter() - started
+                    _wait_for_capture_interval(
+                        self._capture_stop_event,
+                        max(0.0, (1.0 / record_fps) - elapsed),
+                    )
+        except Exception as exc:
+            self._mark_recording_failed(f"GDI region capture error: {exc}")
+        finally:
+            _stop_ffmpeg_writer(writer_proc)
+            if was_recording:
+                self._recording_finalized_event.set()
+                if self._recording_finished_cb:
+                    self._recording_finished_cb(self._output_path)
             self._capture_pipeline_ready_event.set()
             self._recording_finalized_event.set()
             self._register_writer_process(None)

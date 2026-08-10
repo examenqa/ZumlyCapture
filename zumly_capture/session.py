@@ -35,6 +35,7 @@ class CaptureSession:
     mouse_track: list[dict[str, Any]] = field(default_factory=list)
     click_events: list[dict[str, Any]] = field(default_factory=list)
     capture_telemetry: dict[str, Any] = field(default_factory=dict)
+    audio: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -54,6 +55,7 @@ class CaptureSession:
             "mouseTrack": list(self.mouse_track),
             "clickEvents": list(self.click_events),
             "captureTelemetry": dict(self.capture_telemetry),
+            "audio": dict(self.audio),
             "smartZoom": {
                 "state": "not_processed",
                 "keyframes": [],

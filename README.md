@@ -10,10 +10,17 @@ capture components are moved behind the standalone `zumly_capture` package.
 
 ## Current status
 
-Phases 1 and 2 establish an independent repository and a direct capture result
-flow. The recording worker now publishes a playable MP4 without launching the
-Zumly editor or exporter. The tray exposes actions to open, copy, or reveal the
-last capture while retaining pause/resume support.
+Phases 1 through 3 establish an independent repository and the complete capture
+surface. The tray can take monitor, active-window, and selected-region
+screenshots; record monitors, windows, and regions; run delayed screenshots and
+recording countdowns; and use configurable global shortcuts. Optional
+DirectShow microphone or loopback tracks are trimmed across recording pauses
+before they are muxed into the result.
+
+The recording worker publishes a playable MP4 without launching the Zumly
+editor or exporter. The tray exposes actions to open, copy, or reveal the last
+capture while retaining pause/resume support. Hardware WGC remains available
+through a NumPy-free native adapter, with a NumPy-free GDI fallback.
 
 Each successful MP4 receives a sibling `*.zumly-capture.json` manifest. The
 manifest preserves monitor geometry, timing, pause boundaries, mouse/click

@@ -7,6 +7,7 @@ import tempfile
 import time
 import uuid
 
+from zumly_capture.audio import AudioCapture, cleanup_audio_tracks, mux_audio_tracks
 from zumly_capture.identity import FILE_PREFIX, PRODUCT_NAME
 from zumly_capture.session import CaptureSession, publish_recording
 
@@ -102,15 +103,51 @@ def _write_status_payload(
 
 
 def _run(args: argparse.Namespace) -> int:
-    # Determine monitor dimensions
-    monitor_rect = {}
-    for mon in ScreenRecorder.get_monitors():
-        if mon["index"] == args.monitor:
-            monitor_rect = mon
-            break
+    target_kind = str(args.target_kind or "monitor").lower()
+    capture_rect: dict = {}
+    capture_target: dict = {"kind": target_kind}
+    if target_kind == "monitor":
+        for monitor in ScreenRecorder.get_monitors():
+            if monitor["index"] == args.monitor:
+                capture_rect = dict(monitor)
+                break
+        if not capture_rect:
+            return _failure(
+                args.result_file,
+                f"Could not find monitor with index {args.monitor}",
+            )
+        capture_target["monitorIndex"] = int(args.monitor)
+    elif target_kind == "window":
+        from zumly.app.window_utils import get_window_rect
 
-    if not monitor_rect:
-        return _failure(args.result_file, f"Could not find monitor with index {args.monitor}")
+        capture_rect = get_window_rect(int(args.window_hwnd)) or {}
+        if not capture_rect:
+            return _failure(args.result_file, "The selected window is no longer available")
+        capture_target["windowHandle"] = int(args.window_hwnd)
+        capture_target["windowTitle"] = str(args.window_title or "")
+    elif target_kind == "region":
+        if len(args.region) != 4:
+            return _failure(args.result_file, "Region capture requires left, top, width, height")
+        left, top, width, height = (int(value) for value in args.region)
+        width = max(2, width - width % 2)
+        height = max(2, height - height % 2)
+        capture_rect = {
+            "left": left,
+            "top": top,
+            "width": width,
+            "height": height,
+        }
+    else:
+        return _failure(args.result_file, f"Unsupported capture target: {target_kind}")
+
+    capture_target.update(
+        {
+            "left": int(capture_rect.get("left", 0)),
+            "top": int(capture_rect.get("top", 0)),
+            "width": int(capture_rect.get("width", 0)),
+            "height": int(capture_rect.get("height", 0)),
+        }
+    )
 
     # Trackers
     click_tracker = ClickTracker()
@@ -145,20 +182,32 @@ def _run(args: argparse.Namespace) -> int:
         timeline_clock=timeline_clock,
     )
 
-    logging.info(f"Starting capture on monitor {args.monitor} at {args.fps} FPS...")
-    recorder.start_capture(args.monitor, args.fps)
+    logging.info("Starting %s capture at %s FPS...", target_kind, args.fps)
+    if target_kind == "window":
+        recorder.start_capture_window(int(args.window_hwnd), args.fps)
+    elif target_kind == "region":
+        recorder.start_capture_region(capture_rect, args.fps)
+    else:
+        recorder.start_capture(args.monitor, args.fps)
 
     # Let capture spin up
     time.sleep(2.0)
 
     # Complete all potentially blocking preparation before defining time zero.
     raw_video_path = recorder.prepare_recording()
+    audio_capture = AudioCapture(
+        [str(args.microphone or ""), str(args.system_audio or "")]
+    )
+    audio_capture.start()
+    if args.microphone or args.system_audio:
+        time.sleep(0.25)
     SESSION_EPOCH = time.perf_counter()
+    audio_lead_ms = max(0.0, (SESSION_EPOCH - audio_capture.started_at) * 1000.0)
     recorder.start_recording(
         session_epoch=SESSION_EPOCH,
         timeline_clock=timeline_clock,
     )
-    click_tracker.start(SESSION_EPOCH, monitor_rect, timeline_clock=timeline_clock)
+    click_tracker.start(SESSION_EPOCH, capture_rect, timeline_clock=timeline_clock)
     mouse_tracker.start(SESSION_EPOCH, timeline_clock=timeline_clock)
     recording_wall_time_ms = time.time() * 1000.0
     if not args.stop_file:
@@ -166,7 +215,7 @@ def _run(args: argparse.Namespace) -> int:
 
     from zumly.app.recording_overlay import RecordingOverlay
 
-    overlay = RecordingOverlay(monitor_rect)
+    overlay = RecordingOverlay(capture_rect)
     overlay.start()
     last_control_sequence = 0
     _write_status_payload(
@@ -243,6 +292,7 @@ def _run(args: argparse.Namespace) -> int:
     recorder.stop_recording()
     mouse_events = mouse_tracker.stop()
     click_events = click_tracker.stop()
+    audio_tracks = audio_capture.stop()
     hotkey_tracker.unregister_record_hotkey()
     overlay.stop()
     recorder.stop_capture()
@@ -259,6 +309,7 @@ def _run(args: argparse.Namespace) -> int:
             pass
 
     if recorder.recording_error:
+        cleanup_audio_tracks(audio_tracks)
         return _failure(
             args.result_file,
             f"Recording failed before a usable video was written: {recorder.recording_error}",
@@ -267,14 +318,44 @@ def _run(args: argparse.Namespace) -> int:
     session_id = str(uuid.uuid4())
     duration_ms = recorder.recording_duration_ms
     output_path = os.path.abspath(args.out)
-    capture_target = {
-        "kind": "monitor",
-        "monitorIndex": int(args.monitor),
-        "left": int(monitor_rect.get("left", 0)),
-        "top": int(monitor_rect.get("top", 0)),
-        "width": int(monitor_rect.get("width", 0)),
-        "height": int(monitor_rect.get("height", 0)),
+    pause_boundaries = [boundary.to_dict() for boundary in timeline_clock.pause_boundaries]
+    publication_source = raw_video_path
+    warnings: list[str] = []
+    audio_manifest = {
+        "requestedDevices": [track.device for track in audio_tracks],
+        "state": "disabled" if not (args.microphone or args.system_audio) else "unavailable",
     }
+    if audio_tracks:
+        mux_handle = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
+        mux_path = mux_handle.name
+        mux_handle.close()
+        try:
+            os.remove(mux_path)
+        except OSError:
+            pass
+        muxed, mux_error = mux_audio_tracks(
+            raw_video_path,
+            audio_tracks,
+            mux_path,
+            duration_ms,
+            pause_boundaries,
+            lead_ms=audio_lead_ms,
+        )
+        if muxed:
+            publication_source = mux_path
+            audio_manifest["state"] = "muxed"
+        else:
+            try:
+                os.remove(mux_path)
+            except OSError:
+                pass
+            warnings.append("Audio capture was unavailable; the video was saved without audio.")
+            if mux_error:
+                logging.warning("Audio mux failed: %s", mux_error)
+    elif args.microphone or args.system_audio:
+        warnings.append("The selected audio device did not produce a usable track.")
+    cleanup_audio_tracks(audio_tracks)
+
     session = CaptureSession(
         session_id=session_id,
         media_path=output_path,
@@ -282,7 +363,7 @@ def _run(args: argparse.Namespace) -> int:
         started_at_unix_ms=recording_wall_time_ms,
         duration_ms=duration_ms,
         paused_duration_ms=timeline_clock.paused_duration_ms,
-        pause_boundaries=[boundary.to_dict() for boundary in timeline_clock.pause_boundaries],
+        pause_boundaries=pause_boundaries,
         requested_fps=float(args.fps),
         actual_fps=recorder.actual_fps,
         is_cfr=recorder.is_cfr,
@@ -291,14 +372,16 @@ def _run(args: argparse.Namespace) -> int:
         mouse_track=[event.to_dict() for event in mouse_events],
         click_events=[event.to_dict() for event in click_events],
         capture_telemetry=recorder.capture_telemetry,
+        audio=audio_manifest,
     )
 
     logging.info("Recording stopped. Publishing video to %s", output_path)
     try:
-        published = publish_recording(raw_video_path, output_path, session)
+        published = publish_recording(publication_source, output_path, session)
     except Exception as exc:
         logging.exception("Could not publish the completed recording: %s", exc)
-        recovery_path = os.path.abspath(raw_video_path) if os.path.isfile(raw_video_path) else ""
+        recovery_candidate = publication_source if os.path.isfile(publication_source) else raw_video_path
+        recovery_path = os.path.abspath(recovery_candidate) if os.path.isfile(recovery_candidate) else ""
         return _failure(
             args.result_file,
             f"Could not save the completed recording: {exc}",
@@ -314,15 +397,22 @@ def _run(args: argparse.Namespace) -> int:
         "durationMs": duration_ms,
         "returnCode": 0,
     }
+    if publication_source != raw_video_path:
+        try:
+            os.remove(raw_video_path)
+        except OSError:
+            pass
     if published.warning:
-        payload["warning"] = published.warning
+        warnings.append(published.warning)
+    if warnings:
+        payload["warning"] = " ".join(warnings)
     if not _write_result_payload(args.result_file, payload):
         return 1
 
     if published.manifest_path:
         logging.info("Capture manifest saved to %s", published.manifest_path)
-    if published.warning:
-        logging.warning(published.warning)
+    for warning in warnings:
+        logging.warning(warning)
     logging.info("Force exiting to release WGC hooks...")
     return 0
 
@@ -332,6 +422,24 @@ def main() -> int:
     parser.add_argument("--out", "-o", required=True, help="Output MP4 path")
     parser.add_argument("--monitor", "-m", type=int, default=1, help="Monitor index (default 1)")
     parser.add_argument("--fps", type=int, default=60, help="Recording FPS")
+    parser.add_argument(
+        "--target-kind",
+        choices=("monitor", "window", "region"),
+        default="monitor",
+        help="Capture target type",
+    )
+    parser.add_argument("--window-hwnd", type=int, default=0, help="Window handle to capture")
+    parser.add_argument("--window-title", default="", help="Selected window title for metadata")
+    parser.add_argument(
+        "--region",
+        type=int,
+        nargs=4,
+        default=(),
+        metavar=("LEFT", "TOP", "WIDTH", "HEIGHT"),
+        help="Physical-pixel region rectangle",
+    )
+    parser.add_argument("--microphone", default="", help="DirectShow microphone device")
+    parser.add_argument("--system-audio", default="", help="DirectShow loopback audio device")
     parser.add_argument(
         "--duration",
         "-d",

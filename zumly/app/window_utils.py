@@ -1,10 +1,10 @@
 """Windows window enumeration utilities using ctypes."""
 
+from __future__ import annotations
+
 import ctypes
 from ctypes import wintypes
 from typing import List, Optional
-
-import numpy as np
 
 user32 = ctypes.windll.user32
 
@@ -113,13 +113,15 @@ def get_window_rect(hwnd: int) -> Optional[dict]:
 
 def capture_window_thumbnail(
     hwnd: int, max_w: int = 400, max_h: int = 220,
-) -> Optional[np.ndarray]:
+) -> Optional[object]:
     """Capture a thumbnail of a window using Win32 PrintWindow.
 
     Uses the window's own device context so overlapping windows don't bleed through.
     Qt sets PER_MONITOR_DPI_AWARE_V2, so GetWindowRect already returns physical pixels.
     Returns an RGB numpy array sized to fit within (max_w, max_h), or None.
     """
+    import numpy as np
+
     rect = get_window_rect(hwnd)
     if not rect or rect["width"] < 10 or rect["height"] < 10:
         return None
@@ -217,6 +219,7 @@ def capture_window_thumbnail(
 def _capture_window_mss_fallback(
     hwnd: int, w: int, h: int, max_w: int, max_h: int,
 ) -> Optional[np.ndarray]:
+    import numpy as np
     """Fallback: grab the screen region where the window sits."""
     import mss as mss_mod
     from PIL import Image
