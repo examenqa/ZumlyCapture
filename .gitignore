@@ -1,0 +1,69 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+
+# PyInstaller
+dist/
+build/
+*.spec
+!zumly_capture.spec
+
+# Generated documentation
+/site/
+
+# Local recording/debug artifacts
+*_project.json
+config.json
+*.db
+*.sqlite
+*.patch
+e2e_artifacts/
+.agents/
+.tmp/
+codex_tmp/
+zumly/pytest-cache-files-*/
+/.pytest*/
+/pytest-*/
+/pytest_*/
+/release-test*/
+/.release-test*/
+/.codex-pytest*/
+/zumly/stderr.txt
+
+# Local code knowledge graph
+/.codebase-memory/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# MSIX generated assets (rebuilt by generate_msix_assets.py)
+zumly/msix/Assets/
+
+# Logs
+*.log
+
+# Root/runtime screenshots (keep packaged image assets trackable)
+/*.png
+/*.jpg
+/zumly/*.png
+/zumly/*.jpg
+
+# Dev signing certificates
+.certs/
+
+# IDE (keep .vscode tracked for shared config)
+.idea/
+# Squad: ignore runtime state (logs, inbox, sessions)
+.squad/orchestration-log/
+.squad/log/
+.squad/decisions/inbox/
+.squad/sessions/
+# Squad: SubSquad activation file (local to this machine)
+.squad-workstream

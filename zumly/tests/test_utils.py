@@ -1,0 +1,278 @@
+"""Tests for app.utils — fmt_time, encoder profiles, build_encoder_args, GIF."""
+
+import pytest
+from PIL import Image
+from unittest.mock import patch
+
+from app.utils import (
+    fmt_time,
+    ENCODER_PROFILES,
+    build_encoder_args,
+    encoder_display_name,
+    best_hw_encoder,
+    detect_available_encoders,
+    probe_encoder_initialization,
+    ImageValidationError,
+    validate_imported_image,
+    GIF_FPS,
+    build_gif_args,
+)
+
+
+def test_image_dimension_probe_rejects_oversized_edge(tmp_path) -> None:
+    path = tmp_path / "too-wide.png"
+    Image.new("L", (8193, 1), 0).save(path)
+
+    with pytest.raises(ImageValidationError, match="too large"):
+        validate_imported_image(str(path))
+
+
+def test_image_dimension_probe_accepts_safe_image(tmp_path) -> None:
+    path = tmp_path / "safe.png"
+    Image.new("RGB", (1920, 1080), "black").save(path)
+
+    assert validate_imported_image(str(path)) == (1920, 1080)
+
+# ── fmt_time ────────────────────────────────────────────────────────
+
+
+class TestFmtTime:
+    def test_zero(self) -> None:
+        assert fmt_time(0) == "0:00"
+
+    def test_under_one_minute(self) -> None:
+        assert fmt_time(5000) == "0:05"
+
+    def test_one_minute(self) -> None:
+        assert fmt_time(60000) == "1:00"
+
+    def test_multi_minute(self) -> None:
+        assert fmt_time(125000) == "2:05"
+
+    def test_large_value(self) -> None:
+        assert fmt_time(3600000) == "60:00"
+
+    def test_fractional_ms(self) -> None:
+        # 1500.7ms → 1s
+        assert fmt_time(1500.7) == "0:01"
+
+    def test_pads_seconds(self) -> None:
+        assert fmt_time(3000) == "0:03"  # "03" not "3"
+
+
+# ── ENCODER_PROFILES ────────────────────────────────────────────────
+
+
+class TestEncoderProfiles:
+    def test_all_required_keys(self) -> None:
+        expected = {"h264_nvenc", "h264_qsv", "h264_amf", "h264_mf", "libx264"}
+        assert set(ENCODER_PROFILES.keys()) == expected
+
+    def test_profile_structure(self) -> None:
+        for enc_id, (name, codec, args) in ENCODER_PROFILES.items():
+            assert isinstance(name, str) and len(name) > 0
+            assert isinstance(codec, str)
+            assert isinstance(args, list)
+
+    def test_libx264_is_software(self) -> None:
+        name, codec, _ = ENCODER_PROFILES["libx264"]
+        assert "x264" in codec
+        assert "Software" in name
+
+
+# ── build_encoder_args ──────────────────────────────────────────────
+
+
+class TestBuildEncoderArgs:
+    def test_known_encoder(self) -> None:
+        args = build_encoder_args("libx264")
+        assert "-c:v" in args
+        assert "libx264" in args
+        assert "-pix_fmt" in args
+        assert "yuv420p" in args
+
+    def test_nvenc_args(self) -> None:
+        args = build_encoder_args("h264_nvenc")
+        assert "h264_nvenc" in args
+        assert "-pix_fmt" in args
+
+    @pytest.mark.parametrize(
+        ("encoder_id", "codec"),
+        [
+            ("h264_nvenc", "h264_nvenc"),
+            ("h264_qsv", "h264_qsv"),
+            ("h264_amf", "h264_amf"),
+        ],
+    )
+    def test_hardware_profiles_route_to_their_codec(self, encoder_id, codec) -> None:
+        args = build_encoder_args(encoder_id)
+        assert args[args.index("-c:v") + 1] == codec
+
+    def test_unknown_encoder_falls_back(self) -> None:
+        """Unknown encoder ID should fall back to libx264."""
+        args = build_encoder_args("nonexistent_encoder")
+        assert "libx264" in args
+
+    def test_args_always_end_with_pix_fmt(self) -> None:
+        for enc_id in ENCODER_PROFILES:
+            args = build_encoder_args(enc_id)
+            # Must contain -pix_fmt yuv420p
+            assert "-pix_fmt" in args
+            idx = args.index("-pix_fmt")
+            assert args[idx + 1] == "yuv420p"
+
+    def test_args_contain_movflags_faststart(self) -> None:
+        for enc_id in ENCODER_PROFILES:
+            args = build_encoder_args(enc_id)
+            assert "-movflags" in args
+            idx = args.index("-movflags")
+            assert args[idx + 1] == "+faststart"
+
+
+# ── encoder_display_name ────────────────────────────────────────────
+
+
+class TestEncoderDisplayName:
+    def test_known(self) -> None:
+        assert encoder_display_name("h264_nvenc") == "NVIDIA NVENC"
+        assert encoder_display_name("libx264") == "Software (x264)"
+
+    def test_unknown_returns_raw_id(self) -> None:
+        assert encoder_display_name("unknown_codec") == "unknown_codec"
+
+
+# ── detect_available_encoders / best_hw_encoder ─────────────────────
+
+
+class TestEncoderDetection:
+    @pytest.mark.parametrize("encoder_id", ["h264_nvenc", "h264_qsv", "h264_amf"])
+    def test_probe_uses_hardware_compatible_dimensions(
+        self,
+        monkeypatch,
+        encoder_id: str,
+    ) -> None:
+        """All hardware probes use a frame large enough for NVENC."""
+        observed: dict[str, list[str]] = {}
+
+        def fake_run(command, **_kwargs):
+            observed["command"] = command
+            return type("Completed", (), {"returncode": 0, "stderr": b""})()
+
+        monkeypatch.setattr("app.utils.subprocess.run", fake_run)
+
+        assert probe_encoder_initialization(encoder_id, "ffmpeg.exe") is True
+        command = observed["command"]
+        assert command[command.index("-i") + 1] == "color=c=black:s=256x256:r=1"
+
+    def test_libx264_always_present(self) -> None:
+        """libx264 must always be in the available list (software fallback)."""
+        # Reset cache to force re-detection
+        import app.utils
+        app.utils._available_encoders = None
+        encoders = detect_available_encoders()
+        assert "libx264" in encoders
+        # Reset cache
+        app.utils._available_encoders = None
+
+    def test_best_hw_encoder_prefers_hardware(self) -> None:
+        """best_hw_encoder should return the first encoder from detection."""
+        import app.utils
+        app.utils._available_encoders = None
+        enc = best_hw_encoder()
+        assert enc in ENCODER_PROFILES
+        # Must match the first entry from detect (preference order)
+        detected = detect_available_encoders()
+        assert enc == detected[0]
+        app.utils._available_encoders = None
+
+    def test_detection_caching(self) -> None:
+        """Second call should return cached result."""
+        import app.utils
+        app.utils._available_encoders = None
+        first = detect_available_encoders()
+        second = detect_available_encoders()
+        assert first is second  # same object (cached)
+        app.utils._available_encoders = None
+
+    def test_probe_failure_still_has_libx264(self) -> None:
+        """If ffmpeg probe fails, libx264 should still be available."""
+        import app.utils
+        app.utils._available_encoders = None
+        with patch("app.utils.ffmpeg_exe", side_effect=Exception("no ffmpeg")):
+            encoders = detect_available_encoders()
+            assert encoders == ["libx264"]
+        app.utils._available_encoders = None
+
+    def test_detection_requires_initialization_for_hardware(self, monkeypatch) -> None:
+        """A listed hardware codec is exposed only after its init probe passes."""
+        import app.utils
+
+        app.utils._available_encoders = None
+        monkeypatch.setattr(app.utils, "ffmpeg_exe", lambda: "ffmpeg.exe")
+        monkeypatch.setattr(
+            app.utils.subprocess,
+            "run",
+            lambda *args, **kwargs: type(
+                "Completed",
+                (),
+                {"returncode": 0, "stdout": b"h264_nvenc h264_qsv libx264", "stderr": b""},
+            )(),
+        )
+        monkeypatch.setattr(
+            app.utils,
+            "probe_encoder_initialization",
+            lambda enc_id, ffmpeg: enc_id == "h264_nvenc",
+        )
+
+        assert app.utils.detect_available_encoders() == ["h264_nvenc", "libx264"]
+        app.utils._available_encoders = None
+
+
+# ── GIF export support ───────────────────────────────────────────────
+
+
+class TestGifExport:
+    def test_gif_fps_is_positive_int(self) -> None:
+        assert isinstance(GIF_FPS, int)
+        assert GIF_FPS > 0
+
+    def test_build_gif_args_has_palette_pipeline(self) -> None:
+        """GIF args must include the palettegen+paletteuse filtergraph."""
+        args = build_gif_args()
+        assert "-vf" in args
+        vf_value = args[args.index("-vf") + 1]
+        # Must contain the split→palettegen→paletteuse pipeline
+        assert "palettegen" in vf_value
+        assert "paletteuse" in vf_value
+        assert "split" in vf_value
+        assert f"fps={GIF_FPS}" in vf_value
+
+    def test_build_gif_args_contains_vf(self) -> None:
+        args = build_gif_args()
+        assert "-vf" in args
+
+    def test_build_gif_args_loop_flag(self) -> None:
+        args = build_gif_args()
+        assert "-loop" in args
+        loop_val = args[args.index("-loop") + 1]
+        assert loop_val == "0"  # loop forever
+
+    def test_build_gif_args_default_fps(self) -> None:
+        args = build_gif_args()
+        vf = args[args.index("-vf") + 1]
+        assert f"fps={GIF_FPS}" in vf
+
+    def test_build_gif_args_custom_fps(self) -> None:
+        args = build_gif_args(gif_fps=10)
+        vf = args[args.index("-vf") + 1]
+        assert "fps=10" in vf
+
+    def test_build_gif_args_contains_palettegen(self) -> None:
+        args = build_gif_args()
+        vf = args[args.index("-vf") + 1]
+        assert "palettegen" in vf
+
+    def test_build_gif_args_contains_paletteuse(self) -> None:
+        args = build_gif_args()
+        vf = args[args.index("-vf") + 1]
+        assert "paletteuse" in vf

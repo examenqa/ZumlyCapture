@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 260" role="img" aria-labelledby="title desc">
+  <title id="title">Zumly wordmark</title>
+  <desc id="desc">A rounded deep-navy vector wordmark spelling Zumly.</desc>
+
+  <!-- Every letter is drawn as geometry; there is no live font dependency. -->
+  <g fill="none" stroke="#0F1738" stroke-width="23" stroke-linecap="round" stroke-linejoin="round">
+    <!-- Z -->
+    <path d="M47 51H129L48 180H133"/>
+
+    <!-- u -->
+    <path d="M161 99V157C161 175 172 184 194 184C216 184 229 172 229 153V99"/>
+
+    <!-- m -->
+    <path d="M268 180V119C268 104 279 97 296 97C315 97 326 108 326 126V180"/>
+    <path d="M326 126C326 108 338 97 356 97C375 97 387 109 387 127V180"/>
+
+    <!-- l -->
+    <path d="M438 51V180"/>
+
+    <!-- y -->
+    <path d="M477 99V151C477 173 489 184 510 184C532 184 545 171 545 151V99"/>
+    <path d="M545 151V182C545 214 531 228 507 228C495 228 486 225 477 220"/>
+  </g>
+</svg>

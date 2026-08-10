@@ -1,0 +1,996 @@
+"""Dark theme QSS stylesheet — Fluent 2 / Windows 11 component patterns.
+
+All color values, spacing, and corner radii are sourced from the
+centralized design-token module (:mod:`zumly.app.tokens`).
+Component styling follows Fluent 2 Web patterns for buttons, tabs,
+cards, inputs, menus, dialogs, sliders, and progress indicators.
+
+Reference: https://fluent2.microsoft.design/components/web/react/
+"""
+
+from PySide6.QtGui import QColor, QPalette
+
+from . import tokens as T
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# LIGHT THEME — helper for building the light-mode QSS
+# ══════════════════════════════════════════════════════════════════════════
+
+def _build_light_theme() -> str:
+    """Build the light-theme QSS from the dark theme via a sentinel mapping.
+
+    A two-pass approach is used so that no substitution can accidentally alter
+    a value already written by an earlier one:
+
+    Pass 1: replace every dark token value with a unique ``%%NAME%%`` sentinel.
+    Pass 2: replace each sentinel with its corresponding light token value.
+
+    When multiple dark tokens share the same hex value (e.g. ``BG_LAYER_4``,
+    ``BG_CARD``, and ``BG_SUBTLE_SELECTED`` all equal ``"#333333"``) only the
+    first sentinel wins and all occurrences receive the same light value — a
+    known limitation documented inline below.
+    """
+    # (sentinel_name, dark_value, light_value)
+    # Longer / more specific dark values are listed first to avoid partial
+    # substring matches during pass 1 (e.g. rgba strings before hex strings).
+    SUBSTITUTIONS = [
+        # ── Brand translucent (rgba strings — must come before bare hex) ───
+        ("BRAND_TRANSLUCENT_STRONG",  T.BRAND_TRANSLUCENT_STRONG,  T.LIGHT_BRAND_TRANSLUCENT_STRONG),
+        ("BRAND_TRANSLUCENT_HOVER",   T.BRAND_TRANSLUCENT_HOVER,   T.LIGHT_BRAND_TRANSLUCENT_HOVER),
+        ("BRAND_TRANSLUCENT",         T.BRAND_TRANSLUCENT,         T.LIGHT_BRAND_TRANSLUCENT),
+        # ── Foreground / text ───────────────────────────────────────────────
+        # NOTE: FG_3 == STROKE_ACCESSIBLE == "#adadad"; one sentinel handles both.
+        ("FG_PRIMARY",    T.FG_PRIMARY,    T.LIGHT_FG_1),
+        ("FG_2",          T.FG_2,          T.LIGHT_FG_2),
+        ("FG_3",          T.FG_3,          T.LIGHT_FG_3),
+        ("FG_4",          T.FG_4,          T.LIGHT_FG_4),
+        ("FG_DISABLED",   T.FG_DISABLED,   "#a6a6a6"),
+        # ── Backgrounds ─────────────────────────────────────────────────────
+        ("BG_LAYER_1",        T.BG_LAYER_1,        T.LIGHT_BG_2),
+        ("BG_LAYER_2",        T.BG_LAYER_2,        T.LIGHT_BG_3),
+        # BG_LAYER_3 == BG_SURFACE == "#292929"; both become LIGHT_BG_1.
+        ("BG_LAYER_3",        T.BG_LAYER_3,        T.LIGHT_BG_1),
+        # BG_LAYER_4 == BG_CARD == BG_SUBTLE_SELECTED == "#333333".
+        # All share the same dark value so they receive a single light value.
+        ("BG_LAYER_4",        T.BG_LAYER_4,        T.LIGHT_BG_3),
+        # BG_LAYER_5 == BG_CARD_HOVER == "#3d3d3d"; one sentinel handles both.
+        ("BG_LAYER_5",        T.BG_LAYER_5,        T.LIGHT_BG_4),
+        ("BG_SUBTLE_HOVER",   T.BG_SUBTLE_HOVER,   T.LIGHT_BG_SUBTLE_HOVER),
+        ("BG_SUBTLE_PRESSED", T.BG_SUBTLE_PRESSED, T.LIGHT_BG_SUBTLE_PRESSED),
+        # ── Borders ─────────────────────────────────────────────────────────
+        ("STROKE_1",      T.STROKE_1,      T.LIGHT_STROKE_1),
+        ("STROKE_2",      T.STROKE_2,      T.LIGHT_STROKE_2),
+        # STROKE_ACCESSIBLE shares its value with FG_3; already handled above.
+        # ── Brand ────────────────────────────────────────────────────────────
+        # BRAND_HOVER must precede BRAND to avoid matching the shared prefix.
+        ("BRAND_HOVER",   T.BRAND_HOVER,   T.LIGHT_BRAND_BG_HOVER),
+        ("BRAND_ACTIVE",  T.BRAND_ACTIVE,  T.LIGHT_BRAND_BG_PRESSED),
+        # LIGHT_BRAND_BG == BRAND == "#8b5cf6" (purple preserved in light mode),
+        # so this substitution is a no-op and is included only for clarity.
+        ("BRAND",         T.BRAND,         T.LIGHT_BRAND_BG),
+    ]
+
+    qss = DARK_THEME
+    # Pass 1 — replace dark values with sentinels
+    for name, dark_val, _ in SUBSTITUTIONS:
+        qss = qss.replace(dark_val, f"%%{name}%%")
+    # Pass 2 — replace sentinels with light values
+    for name, _, light_val in SUBSTITUTIONS:
+        qss = qss.replace(f"%%{name}%%", light_val)
+    return qss
+
+DARK_THEME = f"""
+/* ══════════════════════════════════════════════════════════════
+   GLOBAL BASE
+   ══════════════════════════════════════════════════════════════ */
+QWidget {{
+    background-color: {T.BG_SURFACE};
+    color: {T.FG_PRIMARY};
+    font-family: {T.FONT_FAMILY};
+    font-size: {T.FONT_SIZE_BODY_1}px;
+    font-weight: {T.FONT_WEIGHT_REGULAR};
+    border: none;
+}}
+
+/* ══════════════════════════════════════════════════════════════
+   BUTTONS — Fluent 2 Button Patterns
+   https://fluent2.microsoft.design/components/web/react/core/button/usage
+   ══════════════════════════════════════════════════════════════ */
+
+/* Base button (Secondary appearance) */
+QPushButton {{
+    background-color: {T.BG_LAYER_3};
+    color: {T.FG_PRIMARY};
+    border: 1px solid {T.STROKE_1};
+    border-radius: {T.RADIUS_SMALL}px;
+    padding: {T.SPACE_6}px {T.SPACE_MD}px;
+    font-size: {T.FONT_SIZE_BODY_1}px;
+    font-weight: {T.FONT_WEIGHT_MEDIUM};
+    min-height: 32px;
+}}
+QPushButton:hover {{
+    background-color: {T.BG_LAYER_4};
+    border-color: {T.STROKE_ACCESSIBLE};
+}}
+QPushButton:pressed {{
+    background-color: {T.BG_LAYER_2};
+}}
+QPushButton:disabled {{
+    background-color: {T.BG_LAYER_2};
+    color: {T.FG_DISABLED};
+    border-color: {T.STROKE_2};
+}}
+QPushButton#DestructiveButton {{
+    background-color: {T.DANGER_TRANSLUCENT};
+    color: {T.DANGER_FG};
+    border: 1px solid {T.DANGER};
+}}
+QPushButton#DestructiveButton:hover {{
+    background-color: {T.DANGER_BG_1};
+    color: #ffffff;
+    border-color: {T.DANGER_HOVER};
+}}
+QPushButton#DestructiveButton:pressed {{
+    background-color: {T.DANGER_BG_2};
+}}
+QPushButton#DestructiveButton:disabled {{
+    background-color: {T.BG_LAYER_2};
+    color: {T.FG_DISABLED};
+    border-color: {T.STROKE_2};
+}}
+/* Focus ring — Fluent 2 spec: 2px brand outline, 2px offset
+   NOTE: Qt QSS doesn't support outline/outline-offset reliably.
+   Using border instead, with padding adjustment to prevent size shift. */
+QPushButton:focus {{
+    border: 2px solid {T.ACCENT};
+    padding: {T.SPACE_XS - 1}px {T.SPACE_SM - 1}px;
+}}
+
+/* ══════════════════════════════════════════════════════════════
+   INPUTS — Fluent 2 Input & Textarea Patterns
+   https://fluent2.microsoft.design/components/web/react/core/input/usage
+   ══════════════════════════════════════════════════════════════ */
+QLineEdit, QTextEdit {{
+    background-color: {T.BG_LAYER_2};
+    color: {T.FG_PRIMARY};
+    border: 1px solid {T.STROKE_1};
+    border-radius: {T.RADIUS_SMALL}px;
+    padding: {T.SPACE_6}px {T.SPACE_SM}px;
+    font-size: {T.FONT_SIZE_BODY_1}px;
+    selection-background-color: {T.ACCENT};
+    selection-color: {T.FG_PRIMARY};
+}}
+QLineEdit:hover, QTextEdit:hover {{
+    border-color: {T.STROKE_ACCESSIBLE};
+}}
+QLineEdit:focus, QTextEdit:focus {{
+    outline: {T.FOCUS_RING_WIDTH}px solid {T.ACCENT};
+    outline-offset: {T.FOCUS_RING_OFFSET}px;
+    border-color: {T.ACCENT};
+}}
+QLineEdit:disabled, QTextEdit:disabled {{
+    background-color: {T.BG_LAYER_1};
+    color: {T.FG_DISABLED};
+    border-color: {T.STROKE_2};
+}}
+
+/* ══════════════════════════════════════════════════════════════
+   COMBOBOX / DROPDOWNS — Fluent 2 Dropdown Pattern
+   https://fluent2.microsoft.design/components/web/react/core/dropdown/usage
+   ══════════════════════════════════════════════════════════════ */
+QComboBox {{
+    background-color: {T.BG_LAYER_2};
+    color: {T.FG_PRIMARY};
+    border: 1px solid {T.STROKE_1};
+    border-radius: {T.RADIUS_SMALL}px;
+    padding: {T.SPACE_6}px {T.SPACE_SM}px;
+    font-size: {T.FONT_SIZE_BODY_1}px;
+    min-height: 32px;
+}}
+QComboBox:hover {{
+    border-color: {T.STROKE_ACCESSIBLE};
+}}
+QComboBox:focus {{
+    outline: {T.FOCUS_RING_WIDTH}px solid {T.ACCENT};
+    outline-offset: {T.FOCUS_RING_OFFSET}px;
+    border-color: {T.ACCENT};
+}}
+QComboBox:disabled {{
+    background-color: {T.BG_LAYER_1};
+    color: {T.FG_DISABLED};
+    border-color: {T.STROKE_2};
+}}
+QComboBox::drop-down {{
+    border: none;
+    width: 24px;
+}}
+QComboBox::down-arrow {{
+    image: none;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-top: 5px solid {T.FG_2};
+    margin-right: {T.SPACE_XS}px;
+}}
+QComboBox QAbstractItemView {{
+    background-color: {T.BG_LAYER_4};
+    color: {T.FG_PRIMARY};
+    border: 1px solid {T.STROKE_2};
+    border-radius: {T.RADIUS_MEDIUM}px;
+    padding: {T.SPACE_XS}px;
+    outline: none;
+    selection-background-color: {T.BG_SUBTLE_SELECTED};
+    selection-color: {T.FG_PRIMARY};
+}}
+QComboBox QAbstractItemView::item {{
+    padding: {T.SPACE_SM}px {T.SPACE_MD}px;
+    border-radius: {T.RADIUS_SMALL}px;
+    min-height: 36px;
+    border: none;
+    outline: none;
+}}
+QComboBox QAbstractItemView::item:hover {{
+    background-color: {T.BG_SUBTLE_HOVER};
+}}
+QComboBox QAbstractItemView::item:selected {{
+    background-color: {T.ACCENT_TRANSLUCENT};
+    color: {T.FG_PRIMARY};
+    border: none;
+    outline: none;
+}}
+
+/* ══════════════════════════════════════════════════════════════
+   SPINBOX — Fluent 2 SpinButton Pattern
+   https://fluent2.microsoft.design/components/web/react/core/spin/usage
+   ══════════════════════════════════════════════════════════════ */
+QSpinBox, QDoubleSpinBox {{
+    background-color: {T.BG_LAYER_2};
+    color: {T.FG_PRIMARY};
+    border: 1px solid {T.STROKE_1};
+    border-radius: {T.RADIUS_SMALL}px;
+    padding: {T.SPACE_6}px {T.SPACE_SM}px;
+    font-size: {T.FONT_SIZE_BODY_1}px;
+    min-height: 32px;
+}}
+QSpinBox:hover, QDoubleSpinBox:hover {{
+    border-color: {T.STROKE_ACCESSIBLE};
+}}
+QSpinBox:focus, QDoubleSpinBox:focus {{
+    outline: {T.FOCUS_RING_WIDTH}px solid {T.ACCENT};
+    outline-offset: {T.FOCUS_RING_OFFSET}px;
+    border-color: {T.ACCENT};
+}}
+QDoubleSpinBox[playheadPickArmed="true"] {{
+    border: 2px solid {T.ACCENT};
+}}
+QSpinBox:disabled, QDoubleSpinBox:disabled {{
+    background-color: {T.BG_LAYER_1};
+    color: {T.FG_DISABLED};
+    border-color: {T.STROKE_2};
+}}
+QSpinBox::up-button, QDoubleSpinBox::up-button,
+QSpinBox::down-button, QDoubleSpinBox::down-button {{
+    background-color: transparent;
+    border: none;
+    border-radius: {T.RADIUS_SMALL}px;
+    width: 24px;
+}}
+QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
+QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {{
+    background-color: {T.BG_SUBTLE_HOVER};
+}}
+
+/* ══════════════════════════════════════════════════════════════
+   RADIO BUTTON — Fluent 2 Radio Pattern
+   ══════════════════════════════════════════════════════════════ */
+QRadioButton {{
+    spacing: {T.SPACE_SM}px;
+    color: {T.FG_PRIMARY};
+    font-size: {T.FONT_SIZE_BODY_1}px;
+}}
+QRadioButton::indicator {{
+    width: 16px;
+    height: 16px;
+    border: 1px solid {T.STROKE_1};
+    border-radius: 8px;
+    background-color: {T.BG_LAYER_2};
+}}
+QRadioButton::indicator:hover {{
+    border-color: {T.STROKE_ACCESSIBLE};
+    background-color: {T.BG_LAYER_3};
+}}
+QRadioButton::indicator:checked {{
+    background-color: {T.ACCENT};
+    border: 2px solid {T.FG_PRIMARY};
+}}
+QRadioButton::indicator:checked:hover {{
+    background-color: {T.ACCENT_HOVER};
+}}
+QRadioButton::indicator:disabled {{
+    background-color: {T.BG_LAYER_1};
+    border-color: {T.STROKE_2};
+}}
+/* ══════════════════════════════════════════════════════════════
+   CHECKBOX — Fluent 2 Checkbox Pattern
+   https://fluent2.microsoft.design/components/web/react/core/checkbox/usage
+   ══════════════════════════════════════════════════════════════ */
+QCheckBox {{
+    spacing: {T.SPACE_SM}px;
+    color: {T.FG_PRIMARY};
+    font-size: {T.FONT_SIZE_BODY_1}px;
+}}
+QCheckBox::indicator {{
+    width: 16px;
+    height: 16px;
+    border: 1px solid {T.STROKE_1};
+    border-radius: {T.RADIUS_SMALL}px;
+    background-color: {T.BG_LAYER_2};
+}}
+QCheckBox::indicator:hover {{
+    border-color: {T.STROKE_ACCESSIBLE};
+    background-color: {T.BG_LAYER_3};
+}}
+QCheckBox::indicator:checked {{
+    background-color: {T.ACCENT};
+    border-color: {T.ACCENT};
+}}
+QCheckBox::indicator:checked:hover {{
+    background-color: {T.ACCENT_HOVER};
+}}
+QCheckBox::indicator:disabled {{
+    background-color: {T.BG_LAYER_1};
+    border-color: {T.STROKE_2};
+}}
+QCheckBox::indicator:focus {{
+    border: 2px solid {T.ACCENT};
+}}
+QCheckBox::indicator:checked:focus {{
+    border: 2px solid {T.ACCENT};
+    background-color: {T.ACCENT};
+}}
+QRadioButton:disabled, QCheckBox:disabled {{
+    color: {T.FG_DISABLED};
+}}
+QRadioButton::indicator:disabled, QCheckBox::indicator:disabled {{
+    border: 1px solid {T.STROKE_2};
+    background-color: {T.BG_LAYER_1};
+}}
+
+/* ══════════════════════════════════════════════════════════════
+   SLIDER — Fluent 2 Slider Pattern
+   https://fluent2.microsoft.design/components/web/react/core/slider/usage
+   ══════════════════════════════════════════════════════════════ */
+QSlider {{
+    min-height: 32px;
+}}
+QSlider::groove:horizontal {{
+    background: {T.STROKE_1};
+    height: 4px;
+    border-radius: 2px;
+}}
+QSlider::handle:horizontal {{
+    background: {T.BG_LAYER_5};
+    border: 2px solid {T.ACCENT};
+    width: 16px;
+    height: 16px;
+    margin: -8px 0;
+    border-radius: 8px;
+}}
+QSlider::handle:horizontal:hover {{
+    background: {T.ACCENT_HOVER};
+    border-color: {T.ACCENT_HOVER};
+}}
+QSlider::handle:horizontal:pressed {{
+    background: {T.ACCENT_ACTIVE};
+    border-color: {T.ACCENT_ACTIVE};
+}}
+QSlider::sub-page:horizontal {{
+    background: {T.ACCENT};
+    border-radius: 2px;
+}}
+QSlider:focus {{
+    outline: {T.FOCUS_RING_WIDTH}px solid {T.ACCENT};
+    outline-offset: {T.FOCUS_RING_OFFSET}px;
+}}
+QSlider:disabled {{
+    opacity: 0.4;
+}}
+
+/* ══════════════════════════════════════════════════════════════
+   TABS — Fluent 2 TabList Pattern
+   https://fluent2.microsoft.design/components/web/react/core/tablist/usage
+   ══════════════════════════════════════════════════════════════ */
+QTabWidget::pane {{
+    border: none;
+    background-color: {T.BG_LAYER_1};
+}}
+QTabBar {{
+    background-color: transparent;
+}}
+QTabBar::tab {{
+    background-color: transparent;
+    color: {T.FG_2};
+    border: none;
+    border-bottom: 2px solid transparent;
+    padding: {T.SPACE_SM}px {T.SPACE_LG}px;
+    font-size: {T.FONT_SIZE_BODY_1}px;
+    font-weight: {T.FONT_WEIGHT_MEDIUM};
+    min-height: 40px;
+}}
+QTabBar::tab:hover {{
+    color: {T.FG_PRIMARY};
+    background-color: {T.BG_SUBTLE_HOVER};
+}}
+QTabBar::tab:selected {{
+    color: {T.FG_PRIMARY};
+    border-bottom-color: {T.ACCENT};
+    font-weight: {T.FONT_WEIGHT_SEMIBOLD};
+}}
+QTabBar::tab:focus {{
+    outline: {T.FOCUS_RING_WIDTH}px solid {T.ACCENT};
+    outline-offset: {T.FOCUS_RING_OFFSET}px;
+}}
+
+/* ══════════════════════════════════════════════════════════════
+   CARDS — Fluent 2 Card Pattern
+   https://fluent2.microsoft.design/components/web/react/core/card/usage
+   ══════════════════════════════════════════════════════════════ */
+QFrame#SourceCard, QFrame#PreviewCard {{
+    background-color: {T.BG_CARD};
+    border: 1px solid {T.STROKE_1};
+    border-radius: {T.RADIUS_MEDIUM}px;
+    padding: {T.SPACE_SM}px;
+}}
+QFrame#SourceCard:hover, QFrame#PreviewCard:hover {{
+    background-color: {T.BG_CARD_HOVER};
+    border-color: {T.STROKE_ACCESSIBLE};
+}}
+QFrame#SourceCardSelected {{
+    background-color: {T.BG_CARD_SELECTED};
+    border: 2px solid {T.ACCENT};
+    border-radius: {T.RADIUS_MEDIUM}px;
+    padding: {T.SPACE_SM}px;
+}}
+
+/* ══════════════════════════════════════════════════════════════
+   MENU — Fluent 2 Menu Pattern
+   https://fluent2.microsoft.design/components/web/react/core/menu/usage
+   ══════════════════════════════════════════════════════════════ */
+QMenu {{
+    background-color: {T.BG_LAYER_4};
+    border: 1px solid {T.STROKE_1};
+    border-radius: {T.RADIUS_MEDIUM}px;
+    padding: {T.SPACE_XS}px;
+}}
+QMenu::item {{
+    background-color: transparent;
+    color: {T.FG_PRIMARY};
+    padding: {T.SPACE_6}px {T.SPACE_MD}px {T.SPACE_6}px {T.SPACE_SM}px;
+    border-radius: {T.RADIUS_SMALL}px;
+    font-size: {T.FONT_SIZE_BODY_1}px;
+    min-height: 32px;
+}}
+QMenu::item:selected {{
+    background-color: {T.ACCENT_TRANSLUCENT};
+    border-left: 2px solid {T.ACCENT};
+}}
+QMenu::item:disabled {{
+    color: {T.FG_DISABLED};
+}}
+QMenu::separator {{
+    background-color: {T.STROKE_2};
+    height: 1px;
+    margin: {T.SPACE_XS}px 0;
+}}
+QMenu::icon {{
+    padding-left: {T.SPACE_SM}px;
+}}
+
+/* ══════════════════════════════════════════════════════════════
+   DIALOG — Fluent 2 Dialog Pattern
+   https://fluent2.microsoft.design/components/web/react/core/dialog/usage
+   ══════════════════════════════════════════════════════════════ */
+QDialog {{
+    background-color: {T.BG_LAYER_3};
+    border: 1px solid {T.STROKE_1};
+    border-radius: {T.RADIUS_LARGE}px;
+}}
+
+/* ══════════════════════════════════════════════════════════════
+   PROGRESS BAR — Fluent 2 ProgressBar Pattern
+   https://fluent2.microsoft.design/components/web/react/core/progressbar/usage
+   ══════════════════════════════════════════════════════════════ */
+QProgressBar {{
+    background-color: {T.BG_LAYER_2};
+    border: none;
+    border-radius: 2px;
+    height: 4px;
+    text-align: center;
+}}
+QProgressBar::chunk {{
+    background-color: {T.ACCENT};
+    border-radius: 2px;
+}}
+
+/* ══════════════════════════════════════════════════════════════
+   SCROLLBAR — Fluent 2 inspired minimal scrollbars
+   ══════════════════════════════════════════════════════════════ */
+QScrollBar:vertical {{
+    width: {T.SCROLLBAR_THIN}px;
+    background: transparent;
+    margin: {T.SPACE_XS}px 0;
+    border-radius: {T.RADIUS_SMALL}px;
+}}
+QScrollBar:vertical:hover {{
+    width: {T.SCROLLBAR_WIDE}px;
+}}
+QScrollBar::handle:vertical {{
+    background: {T.STROKE_1};
+    border-radius: {T.RADIUS_SMALL}px;
+    min-height: {T.SCROLLBAR_MIN_HEIGHT}px;
+}}
+QScrollBar::handle:vertical:hover {{
+    background: {T.STROKE_ACCESSIBLE};
+}}
+QScrollBar::handle:vertical:pressed {{
+    background: {T.FG_2};
+}}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+    height: 0;
+}}
+QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+    background: transparent;
+}}
+QScrollBar:horizontal {{
+    height: {T.SCROLLBAR_THIN}px;
+    background: transparent;
+    margin: 0 {T.SPACE_XS}px;
+    border-radius: {T.RADIUS_SMALL}px;
+}}
+QScrollBar:horizontal:hover {{
+    height: {T.SCROLLBAR_WIDE}px;
+}}
+QScrollBar::handle:horizontal {{
+    background: {T.STROKE_1};
+    border-radius: {T.RADIUS_SMALL}px;
+    min-width: {T.SCROLLBAR_MIN_HEIGHT}px;
+}}
+QScrollBar::handle:horizontal:hover {{
+    background: {T.STROKE_ACCESSIBLE};
+}}
+QScrollBar::handle:horizontal:pressed {{
+    background: {T.FG_2};
+}}
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+    width: 0;
+}}
+QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{
+    background: transparent;
+}}
+
+/* ══════════════════════════════════════════════════════════════
+   TOOLTIPS — Fluent 2 Tooltip Pattern
+   https://fluent2.microsoft.design/components/web/react/core/tooltip/usage
+   ══════════════════════════════════════════════════════════════ */
+QToolTip {{
+    background-color: {T.BG_LAYER_5};
+    color: {T.FG_PRIMARY};
+    border: 1px solid {T.STROKE_1};
+    border-radius: {T.RADIUS_MEDIUM}px;
+    padding: {T.SPACE_6}px {T.SPACE_SM}px;
+    font-size: {T.FONT_SIZE_CAPTION_1}px;
+}}
+
+/* ══════════════════════════════════════════════════════════════
+   APP-SPECIFIC WIDGETS — zumly Components
+   ══════════════════════════════════════════════════════════════ */
+
+/* ── Title Bar (Custom Frameless Window Title) ──── */
+#TitleBar {{
+    background-color: {T.BG_LAYER_1};
+    border-bottom: 1px solid {T.STROKE_2};
+    min-height: 48px;
+    max-height: 48px;
+}}
+#TitleBarLogo {{
+    color: {T.FG_PRIMARY};
+    font-size: {T.FONT_SIZE_BODY_1}px;
+    font-weight: {T.FONT_WEIGHT_SEMIBOLD};
+    background: transparent;
+}}
+#TitleBarStatus {{
+    color: {T.SUCCESS_FG};
+    font-size: {T.FONT_SIZE_CAPTION_1}px;
+    font-weight: {T.FONT_WEIGHT_MEDIUM};
+    background: transparent;
+    padding-left: {T.SPACE_SM}px;
+}}
+/* Subtle appearance title bar buttons */
+#TitleBarBtn {{
+    background: transparent;
+    color: {T.FG_2};
+    border: none;
+    border-radius: {T.RADIUS_SMALL}px;
+    min-width: 40px; max-width: 40px;
+    min-height: 32px; max-height: 32px;
+    font-size: {T.FONT_SIZE_BODY_1}px;
+    padding: 0;
+}}
+#TitleBarBtn:hover {{
+    background-color: {T.BG_SUBTLE_HOVER};
+    color: {T.FG_PRIMARY};
+}}
+#TitleBarBtnClose {{
+    background: transparent;
+    color: {T.FG_2};
+    border: none;
+    border-radius: {T.RADIUS_SMALL}px;
+    min-width: 40px; max-width: 40px;
+    min-height: 32px; max-height: 32px;
+    font-size: {T.FONT_SIZE_BODY_1}px;
+    padding: 0;
+}}
+#TitleBarBtnClose:hover {{
+    background-color: {T.CLOSE_HOVER_BG};
+    color: white;
+}}
+/* Primary button — Export */
+#ExportBtn {{
+    height: 32px;
+    padding: 0 {T.SPACE_LG}px;
+    border-radius: {T.RADIUS_SMALL}px;
+    background-color: {T.BRAND};
+    border: none;
+    color: white;
+    font-size: {T.FONT_SIZE_BODY_1}px;
+    font-weight: {T.FONT_WEIGHT_SEMIBOLD};
+}}
+#ExportBtn:hover {{
+    background-color: {T.BRAND_HOVER};
+}}
+#ExportBtn:pressed {{
+    background-color: {T.BRAND_ACTIVE};
+}}
+#ExportBtn:disabled {{
+    background-color: {T.BRAND_DISABLED};
+    color: {T.FG_DISABLED};
+}}
+/* Project file actions */
+#ProjectBtn {{
+    height: 32px;
+    padding: 0 {T.SPACE_MD}px;
+    border-radius: {T.RADIUS_SMALL}px;
+    background-color: {T.BG_LAYER_3};
+    border: 1px solid {T.STROKE_2};
+    color: {T.FG_PRIMARY};
+    font-size: {T.FONT_SIZE_BODY_1}px;
+    font-weight: {T.FONT_WEIGHT_MEDIUM};
+}}
+#ProjectBtn:hover {{
+    background-color: {T.BG_LAYER_4};
+    border-color: {T.STROKE_1};
+}}
+#ProjectBtn:pressed {{
+    background-color: {T.BG_LAYER_2};
+}}
+#ProjectBtn:disabled {{
+    background-color: {T.BG_LAYER_2};
+    border-color: {T.STROKE_2};
+    color: {T.FG_DISABLED};
+}}
+/* Subtle button with danger color — Discard */
+#DiscardBtn {{
+    height: 32px;
+    padding: 0 {T.SPACE_LG}px;
+    border-radius: {T.RADIUS_SMALL}px;
+    background-color: transparent;
+    border: 1px solid {T.STROKE_1};
+    color: {T.DANGER};
+    font-size: {T.FONT_SIZE_BODY_1}px;
+    font-weight: {T.FONT_WEIGHT_SEMIBOLD};
+}}
+#DiscardBtn:hover {{
+    background-color: {T.DANGER_TRANSLUCENT};
+    border-color: {T.DANGER};
+    color: {T.DANGER_HOVER};
+}}
+#DiscardBtn:pressed {{
+    background-color: {T.DANGER_TRANSLUCENT_STRONG};
+}}
+#DiscardBtn:disabled {{
+    background-color: transparent;
+    border-color: {T.STROKE_2};
+    color: {T.FG_DISABLED};
+}}
+
+/* ── Preview Area ──── */
+#PreviewArea {{
+    background-color: {T.BG_LAYER_1};
+}}
+#PreviewWidget {{
+    background: transparent;
+}}
+#PlaceholderWidget {{
+    background-color: {T.BG_LAYER_2};
+    border: 2px dashed {T.STROKE_1};
+    border-radius: {T.RADIUS_MEDIUM}px;
+}}
+
+/* ── Editor Panel ──── */
+#EditorPanel {{
+    background-color: {T.BG_LAYER_1};
+    border-left: 1px solid {T.STROKE_2};
+    min-width: 280px;
+    max-width: 280px;
+}}
+#EditorTitle {{
+    color: {T.FG_2};
+    font-size: {T.FONT_SIZE_CAPTION_1}px;
+    font-weight: {T.FONT_WEIGHT_SEMIBOLD};
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    background: transparent;
+}}
+/* Keyframe item card */
+#KfItem {{
+    background-color: {T.BG_LAYER_3};
+    border: 1px solid {T.STROKE_2};
+    border-radius: {T.RADIUS_MEDIUM}px;
+    padding: {T.SPACE_SM}px;
+}}
+#KfItem:hover {{
+    border-color: {T.ACCENT};
+    background-color: {T.BG_LAYER_4};
+}}
+/* Subtle delete button */
+#KfDeleteBtn {{
+    background: transparent;
+    color: {T.FG_2};
+    border: none;
+    border-radius: {T.RADIUS_SMALL}px;
+    min-width: 28px; max-width: 28px;
+    min-height: 28px; max-height: 28px;
+}}
+#KfDeleteBtn:hover {{
+    background-color: {T.DANGER_TRANSLUCENT};
+    color: {T.DANGER_HOVER};
+}}
+
+/* ── Timeline ──── */
+#TimelineArea {{
+    background-color: {T.BG_LAYER_1};
+    border-top: 1px solid {T.STROKE_2};
+}}
+#PlaybackControls {{
+    background-color: {T.BG_LAYER_1};
+}}
+/* Play button — secondary */
+#PlayBtn {{
+    background-color: {T.BG_LAYER_3};
+    color: {T.FG_PRIMARY};
+    border: 1px solid {T.STROKE_1};
+    border-radius: {T.RADIUS_MEDIUM}px;
+    min-width: 44px; max-width: 44px;
+    min-height: 44px; max-height: 44px;
+    font-size: {T.FONT_SIZE_SUBTITLE_2}px;
+}}
+#PlayBtn:hover {{
+    background-color: {T.BG_LAYER_4};
+    border-color: {T.STROKE_ACCESSIBLE};
+}}
+#PlayBtn:pressed {{
+    background-color: {T.BG_LAYER_2};
+}}
+#PlayBtn:disabled {{
+    background-color: {T.BG_LAYER_2};
+    border-color: {T.STROKE_2};
+    color: {T.FG_DISABLED};
+}}
+/* Transparent skip buttons */
+#SkipBtn {{
+    background: transparent;
+    color: {T.FG_2};
+    border: none;
+    border-radius: {T.RADIUS_SMALL}px;
+    min-width: 36px; max-width: 36px;
+    min-height: 36px; max-height: 36px;
+    font-size: {T.FONT_SIZE_SUBTITLE_2}px;
+}}
+#SkipBtn:hover {{
+    background-color: {T.BG_SUBTLE_HOVER};
+    color: {T.FG_PRIMARY};
+}}
+#TimelineHintBtn {{
+    background-color: transparent;
+    color: {T.FG_3};
+    border: 1px solid {T.STROKE_2};
+    border-radius: {T.RADIUS_SMALL}px;
+    padding: 0 {T.SPACE_SM}px;
+    font-size: {T.FONT_SIZE_CAPTION_1}px;
+}}
+#TimelineHintBtn:hover {{
+    color: {T.FG_PRIMARY};
+    background-color: {T.BG_LAYER_3};
+    border-color: {T.STROKE_1};
+}}
+#TimeDisplay {{
+    color: {T.FG_PRIMARY};
+    font-size: {T.FONT_SIZE_BODY_1}px;
+    font-weight: {T.FONT_WEIGHT_MEDIUM};
+    background: transparent;
+    font-family: {T.FONT_FAMILY_MONO};
+}}
+#TimeDisplayDim {{
+    color: {T.FG_3};
+    font-size: {T.FONT_SIZE_BODY_1}px;
+    font-weight: {T.FONT_WEIGHT_MEDIUM};
+    background: transparent;
+    font-family: {T.FONT_FAMILY_MONO};
+}}
+
+/* ── Status Bar ──── */
+#StatusBar {{
+    background-color: {T.BG_LAYER_1};
+    border-top: 1px solid {T.STROKE_2};
+    min-height: 28px;
+    max-height: 28px;
+}}
+#StatusLabel {{
+    color: {T.FG_3};
+    font-size: {T.FONT_SIZE_CAPTION_1}px;
+    background: transparent;
+}}
+#StatusDotReady {{
+    background-color: {T.FG_3};
+    min-width: 6px; max-width: 6px;
+    min-height: 6px; max-height: 6px;
+    border-radius: 3px;
+}}
+#StatusDotRecording {{
+    background-color: {T.SUCCESS};
+    min-width: 6px; max-width: 6px;
+    min-height: 6px; max-height: 6px;
+    border-radius: 3px;
+}}
+#StatusDotWarning {{
+    background-color: {T.WARNING};
+    min-width: 6px; max-width: 6px;
+    min-height: 6px; max-height: 6px;
+    border-radius: 3px;
+}}
+#StatusDotInfo {{
+    background-color: {T.INFO};
+    min-width: 6px; max-width: 6px;
+    min-height: 6px; max-height: 6px;
+    border-radius: 3px;
+}}
+
+/* ── Source Picker Dialog ──── */
+#SourcePickerDialog {{
+    background-color: {T.BG_LAYER_3};
+    border: 1px solid {T.STROKE_1};
+    border-radius: {T.RADIUS_LARGE}px;
+}}
+
+/* ── Misc Labels ──── */
+QLabel {{ background: transparent; }}
+QLabel#Muted {{ color: {T.FG_3}; font-size: {T.FONT_SIZE_CAPTION_1}px; }}
+QLabel#Secondary {{ color: {T.FG_2}; font-size: {T.FONT_SIZE_CAPTION_1}px; }}
+
+/* ── Toggle Buttons (Fluent 2 Toggle Pattern) ──── */
+#ToggleBtn {{
+    background-color: {T.BG_LAYER_3};
+    color: {T.FG_2};
+    border: 1px solid {T.STROKE_1};
+    border-radius: {T.RADIUS_SMALL}px;
+    font-size: {T.FONT_SIZE_CAPTION_1}px;
+    font-weight: {T.FONT_WEIGHT_MEDIUM};
+    padding: {T.SPACE_6}px {T.SPACE_MD}px;
+    min-height: 32px;
+}}
+#ToggleBtn:hover {{
+    background-color: {T.BG_LAYER_4};
+    color: {T.FG_PRIMARY};
+}}
+#ToggleBtnActive {{
+    background-color: {T.ACCENT_TRANSLUCENT};
+    color: {T.ACCENT_HOVER};
+    border: 1px solid {T.ACCENT};
+    border-radius: {T.RADIUS_SMALL}px;
+    font-size: {T.FONT_SIZE_CAPTION_1}px;
+    font-weight: {T.FONT_WEIGHT_SEMIBOLD};
+    padding: {T.SPACE_6}px {T.SPACE_MD}px;
+    min-height: 32px;
+}}
+#ToggleBtnActive:hover {{
+    background-color: {T.ACCENT_TRANSLUCENT_STRONG};
+}}
+
+/* ── Depth Combo (legacy styled combobox) ──── */
+#DepthCombo {{
+    background-color: {T.BG_LAYER_3};
+    color: {T.FG_PRIMARY};
+    border: 1px solid {T.STROKE_1};
+    border-radius: {T.RADIUS_SMALL}px;
+    padding: {T.SPACE_6}px {T.SPACE_SM}px;
+    font-size: {T.FONT_SIZE_CAPTION_1}px;
+}}
+#DepthCombo:hover {{
+    border-color: {T.STROKE_ACCESSIBLE};
+}}
+#DepthCombo::drop-down {{
+    border: none;
+    width: 24px;
+}}
+#DepthCombo::down-arrow {{
+    image: none;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-top: 5px solid {T.FG_2};
+    margin-right: {T.SPACE_SM}px;
+}}
+#DepthCombo QAbstractItemView {{
+    background-color: {T.BG_LAYER_4};
+    color: {T.FG_PRIMARY};
+    border: 1px solid {T.STROKE_1};
+    border-radius: {T.RADIUS_MEDIUM}px;
+    selection-background-color: {T.ACCENT};
+    selection-color: {T.FG_PRIMARY};
+    padding: {T.SPACE_XS}px;
+}}
+"""
+
+# ══════════════════════════════════════════════════════════════════════════
+# LIGHT THEME — Fluent 2 Light Mode
+# ══════════════════════════════════════════════════════════════════════════
+
+LIGHT_THEME = _build_light_theme()
+
+
+def get_base_palette(dark: bool = True) -> QPalette:
+    """Return the base ``QPalette`` for the active theme.
+
+    Qt uses this palette before the full QSS is applied and for a few native
+    surfaces that are not fully styled by the stylesheet alone.
+    """
+    palette = QPalette()
+    if dark:
+        palette.setColor(QPalette.ColorRole.Window, QColor(T.BG_LAYER_1))
+        palette.setColor(QPalette.ColorRole.WindowText, QColor(T.FG_PRIMARY))
+        palette.setColor(QPalette.ColorRole.Base, QColor(T.BG_LAYER_2))
+        palette.setColor(QPalette.ColorRole.AlternateBase, QColor(T.BG_LAYER_3))
+        palette.setColor(QPalette.ColorRole.ToolTipBase, QColor(T.BG_LAYER_4))
+        palette.setColor(QPalette.ColorRole.ToolTipText, QColor(T.FG_PRIMARY))
+        palette.setColor(QPalette.ColorRole.Text, QColor(T.FG_PRIMARY))
+        palette.setColor(QPalette.ColorRole.Button, QColor(T.BG_LAYER_3))
+        palette.setColor(QPalette.ColorRole.ButtonText, QColor(T.FG_PRIMARY))
+        palette.setColor(QPalette.ColorRole.Highlight, QColor(T.ACCENT))
+        palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#ffffff"))
+        palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(T.FG_3))
+        return palette
+
+    palette.setColor(QPalette.ColorRole.Window, QColor(T.LIGHT_BG_2))
+    palette.setColor(QPalette.ColorRole.WindowText, QColor(T.LIGHT_FG_1))
+    palette.setColor(QPalette.ColorRole.Base, QColor(T.LIGHT_BG_1))
+    palette.setColor(QPalette.ColorRole.AlternateBase, QColor(T.LIGHT_BG_3))
+    palette.setColor(QPalette.ColorRole.ToolTipBase, QColor(T.LIGHT_BG_1))
+    palette.setColor(QPalette.ColorRole.ToolTipText, QColor(T.LIGHT_FG_1))
+    palette.setColor(QPalette.ColorRole.Text, QColor(T.LIGHT_FG_1))
+    palette.setColor(QPalette.ColorRole.Button, QColor(T.LIGHT_BG_3))
+    palette.setColor(QPalette.ColorRole.ButtonText, QColor(T.LIGHT_FG_1))
+    palette.setColor(QPalette.ColorRole.Highlight, QColor(T.LIGHT_BRAND_BG))
+    palette.setColor(QPalette.ColorRole.HighlightedText, QColor("#ffffff"))
+    palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(T.LIGHT_FG_3))
+    return palette
+
+
+def get_theme(dark: bool = True) -> str:
+    """Return the appropriate QSS stylesheet based on theme preference.
+    
+    Args:
+        dark: If True, return DARK_THEME. If False, return LIGHT_THEME.
+        
+    Returns:
+        QSS stylesheet string
+    """
+    return DARK_THEME if dark else LIGHT_THEME

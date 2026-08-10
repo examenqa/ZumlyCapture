@@ -1,0 +1,76 @@
+[build-system]
+requires = ["setuptools==83.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "zumly-capture"
+dynamic = ["version"]
+description = "A lightweight Windows screenshot and screen-recording app with optional Smart Zoom."
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+license = { file = "LICENSE" }
+authors = [{ name = "Ahmed Sabbour" }]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Environment :: Win32 (MS Windows)",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows :: Windows 11",
+    "Programming Language :: Python :: 3.13",
+]
+dependencies = [
+    "imageio-ffmpeg==0.6.0",
+    "mss==10.2.0",
+    "Pillow==12.3.0",
+    "PySide6==6.11.1",
+    "windows-capture==2.0.0",
+]
+
+[project.optional-dependencies]
+# Transitional dependencies required by copied seed paths. NumPy is deliberately
+# not part of the standalone product runtime and will be removed with those paths.
+seed = [
+    "numpy==2.5.0",
+    "winrt-runtime==3.2.1",
+    "winrt-Windows.Foundation==3.2.1",
+    "winrt-Windows.Foundation.Collections==3.2.1",
+    "winrt-Windows.Graphics.Imaging==3.2.1",
+    "winrt-Windows.Media.Ocr==3.2.1",
+    "winrt-Windows.Storage.Streams==3.2.1",
+]
+test = [
+    "numpy==2.5.0",
+    "pytest==9.1.1",
+]
+build = [
+    "pyinstaller==6.21.0",
+    "pyinstaller-hooks-contrib==2026.6",
+]
+
+[project.scripts]
+zumly-capture = "zumly_capture.cli:main"
+
+[tool.setuptools]
+include-package-data = true
+py-modules = ["tray_app"]
+
+[tool.setuptools.dynamic]
+version = { attr = "zumly_capture.version.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["zumly_capture*", "zumly*"]
+namespaces = true
+
+[tool.setuptools.package-data]
+"zumly.app" = [
+    "branding/*.svg",
+    "branding/generated/*",
+    "cursors/*.svg",
+    "fonts/*",
+    "icons/*.svg",
+    "transition_materials/*.png",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

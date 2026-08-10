@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 360" role="img">
+  <title>Zumly horizontal logo</title>
+  <rect width="1120" height="360" fill="#FFFFFF"/>
+  <g transform="translate(40 40) scale(0.546875)">
+    <title id="title">Zumly logo symbol</title>
+  <desc id="desc">A rounded video screen containing a cyan and purple Z, playback timeline, focus rings, and cursor.</desc>
+  <defs>
+    <linearGradient id="frame-gradient" x1="68" y1="92" x2="441" y2="420" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#05AFC0"/>
+      <stop offset="0.48" stop-color="#08AFC0"/>
+      <stop offset="0.72" stop-color="#6940DA"/>
+      <stop offset="1" stop-color="#6828D7"/>
+    </linearGradient>
+    <linearGradient id="z-gradient" x1="238" y1="142" x2="238" y2="323" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#07AFC0"/>
+      <stop offset="0.40" stop-color="#08AFC0"/>
+      <stop offset="0.58" stop-color="#6E38DC"/>
+      <stop offset="1" stop-color="#6D2BD6"/>
+    </linearGradient>
+  </defs>
+
+  <!-- The white screen remains part of the mark while the outer canvas is transparent. -->
+  <rect x="60" y="86" width="392" height="340" rx="68" fill="#FFFFFF" stroke="url(#frame-gradient)" stroke-width="26"/>
+
+  <!-- One continuous rounded path keeps the Z crisp and scalable. -->
+  <path d="M162 153H322L166 307H318" fill="none" stroke="url(#z-gradient)" stroke-width="32" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Minimal playback and timeline cues. -->
+  <path d="M101 333L101 367L131 350Z" fill="#6D2BD6"/>
+  <path d="M164 350H347" fill="none" stroke="#6D2BD6" stroke-width="8" stroke-linecap="round"/>
+  <circle cx="259" cy="350" r="15" fill="#08AFC0"/>
+
+  <!-- Focus target sits behind the cursor so the symbol reads as an interaction. -->
+  <circle cx="354" cy="266" r="52" fill="none" stroke="#079EB0" stroke-width="7"/>
+  <circle cx="354" cy="266" r="30" fill="none" stroke="#079EB0" stroke-width="7"/>
+
+  <!-- High-contrast cursor with a white separator from the focus rings. -->
+  <path d="M350 252L411 305L381 312L395 344L374 354L360 321L340 341Z" fill="#0F1738" stroke="#FFFFFF" stroke-width="7" stroke-linejoin="round"/>
+  </g>
+  <g transform="translate(360 30) scale(1.166666667)">
+    <title id="title">Zumly wordmark</title>
+  <desc id="desc">A rounded deep-navy vector wordmark spelling Zumly.</desc>
+
+  <!-- Every letter is drawn as geometry; there is no live font dependency. -->
+  <g fill="none" stroke="#0F1738" stroke-width="23" stroke-linecap="round" stroke-linejoin="round">
+    <!-- Z -->
+    <path d="M47 51H129L48 180H133"/>
+
+    <!-- u -->
+    <path d="M161 99V157C161 175 172 184 194 184C216 184 229 172 229 153V99"/>
+
+    <!-- m -->
+    <path d="M268 180V119C268 104 279 97 296 97C315 97 326 108 326 126V180"/>
+    <path d="M326 126C326 108 338 97 356 97C375 97 387 109 387 127V180"/>
+
+    <!-- l -->
+    <path d="M438 51V180"/>
+
+    <!-- y -->
+    <path d="M477 99V151C477 173 489 184 510 184C532 184 545 171 545 151V99"/>
+    <path d="M545 151V182C545 214 531 228 507 228C495 228 486 225 477 220"/>
+  </g>
+  </g>
+</svg>
