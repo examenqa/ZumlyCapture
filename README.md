@@ -10,10 +10,18 @@ capture components are moved behind the standalone `zumly_capture` package.
 
 ## Current status
 
-Phase 1 establishes an independent repository, package identity, settings and
-single-instance namespaces, dependency contract, tests, and packaging baseline.
-The old editor handoff and copied editor modules remain until Phase 2 replaces
-the recording session bridge with a direct capture result flow.
+Phases 1 and 2 establish an independent repository and a direct capture result
+flow. The recording worker now publishes a playable MP4 without launching the
+Zumly editor or exporter. The tray exposes actions to open, copy, or reveal the
+last capture while retaining pause/resume support.
+
+Each successful MP4 receives a sibling `*.zumly-capture.json` manifest. The
+manifest preserves monitor geometry, timing, pause boundaries, mouse/click
+telemetry, frame cadence, and capture diagnostics for later Smart Zoom
+processing. Smart Zoom is intentionally marked `not_processed` until Phase 4.
+
+Copied editor modules remain in the transitional seed tree, but they are no
+longer imported or launched by the capture worker or tray completion flow.
 
 The package specification intentionally excludes NumPy and OpenCV. Some copied
 capture fallbacks still import NumPy and therefore remain transitional; they

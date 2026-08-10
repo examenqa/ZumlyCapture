@@ -1,4 +1,4 @@
-"""Qt system-tray controller for recording, settings, and editor launch."""
+"""Qt system-tray controller for standalone screen recording."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ import threading
 import time
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QTimer, Signal
+from PySide6.QtCore import QMimeData, QObject, QTimer, QUrl, Signal
 from PySide6.QtGui import QAction, QIcon
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon, QMessageBox
 
@@ -83,11 +83,11 @@ class _HotkeyThread(threading.Thread):
 
 
 class QtZumlyCaptureTray(QObject):
-    """Own the Qt tray UI while keeping capture/export in subprocesses."""
+    """Own the Qt tray UI while capture runs in a subprocess."""
 
     toggle_requested = Signal()
     pause_toggle_requested = Signal()
-    recording_finished = Signal(str, int)
+    recording_finished = Signal(object, int)
     engine_state_changed = Signal(str, int)
 
     def __init__(self, app: QApplication, instance_guard: object | None = None) -> None:
@@ -107,7 +107,7 @@ class QtZumlyCaptureTray(QObject):
         self._command_sequence = 0
         self._ack_sequence = -1
         self._cfg = load_general_config()
-        self._editor_window = None
+        self._last_capture_path = ""
         self._settings_dialog = None
         self._tray_icon: QSystemTrayIcon | None = None
         self._idle_tray_icon: QIcon | None = None
@@ -115,6 +115,9 @@ class QtZumlyCaptureTray(QObject):
         self._paused_tray_icon: QIcon | None = None
         self._toggle_action: QAction | None = None
         self._pause_action: QAction | None = None
+        self._open_capture_action: QAction | None = None
+        self._copy_capture_action: QAction | None = None
+        self._reveal_capture_action: QAction | None = None
         self.recording_finished.connect(self._handle_recording_finished)
         self.toggle_requested.connect(self._on_toggle)
         self.pause_toggle_requested.connect(self._on_pause_toggle)
@@ -139,11 +142,6 @@ class QtZumlyCaptureTray(QObject):
         if guard is None or not bool(guard.consume_activation()):
             return
 
-        if self._editor_window is not None and self._editor_window.isVisible():
-            self._editor_window.raise_()
-            self._editor_window.activateWindow()
-            return
-
         if self._state in {
             RecordingState.STARTING,
             RecordingState.RECORDING,
@@ -153,7 +151,10 @@ class QtZumlyCaptureTray(QObject):
             self._notify(f"{PRODUCT_NAME} is already recording")
             return
 
-        self._open_editor()
+        if self._last_capture_path and os.path.isfile(self._last_capture_path):
+            self._show_last_capture()
+        else:
+            self._notify(f"{PRODUCT_NAME} is ready")
 
     def _initialize_tray_ui(self) -> None:
         """Create the persistent tray icon and menu exactly once."""
@@ -178,9 +179,21 @@ class QtZumlyCaptureTray(QObject):
         self._pause_action.triggered.connect(self._on_pause_toggle)
         menu.addAction(self._pause_action)
 
-        open_editor = QAction("Open Editor", self)
-        open_editor.triggered.connect(self._open_editor)
-        menu.addAction(open_editor)
+        menu.addSeparator()
+        self._open_capture_action = QAction("Open Last Capture", self)
+        self._open_capture_action.setEnabled(False)
+        self._open_capture_action.triggered.connect(self._open_last_capture)
+        menu.addAction(self._open_capture_action)
+
+        self._copy_capture_action = QAction("Copy Last Capture", self)
+        self._copy_capture_action.setEnabled(False)
+        self._copy_capture_action.triggered.connect(self._copy_last_capture)
+        menu.addAction(self._copy_capture_action)
+
+        self._reveal_capture_action = QAction("Show in Folder", self)
+        self._reveal_capture_action.setEnabled(False)
+        self._reveal_capture_action.triggered.connect(self._show_last_capture)
+        menu.addAction(self._reveal_capture_action)
 
         menu.addSeparator()
         settings = QAction("Settings", self)
@@ -252,37 +265,55 @@ class QtZumlyCaptureTray(QObject):
             )
             return
         self._cfg = general_config
-        if self._editor_window is not None:
-            self._editor_window.apply_export_settings(export_settings)
         logger.info("General, AI, and export settings saved")
 
-    def _open_editor(self, project_path: str = "") -> None:
-        """Show the existing editor or create an import-ready one."""
-        from .widgets.editor_window import EditorWindow
+    def _capture_is_available(self) -> bool:
+        available = bool(self._last_capture_path and os.path.isfile(self._last_capture_path))
+        if not available:
+            self._last_capture_path = ""
+            self._set_capture_actions_enabled(False)
+        return available
 
-        if self._editor_window is not None:
-            if self._editor_window.isVisible():
-                if project_path:
-                    self._editor_window._load_project(project_path)
-                self._editor_window.raise_()
-                self._editor_window.activateWindow()
-                return
+    def _set_capture_actions_enabled(self, enabled: bool) -> None:
+        for action in (
+            self._open_capture_action,
+            self._copy_capture_action,
+            self._reveal_capture_action,
+        ):
+            if action is not None:
+                action.setEnabled(enabled)
 
-            # A closed editor can remain alive until Qt processes deferred
-            # deletion. Never revive that project-scoped object for a cold
-            # tray launch; its video handles may already be released while its
-            # effects, timeline, and undo history are still populated.
-            self._editor_window.deleteLater()
-            self._editor_window = None
+    def _open_last_capture(self, _checked: bool = False) -> None:
+        if not self._capture_is_available():
+            self._notify("The last capture is no longer available")
+            return
+        try:
+            os.startfile(self._last_capture_path)
+        except OSError as exc:
+            logger.error("Could not open capture: %s", exc)
+            self._notify("Could not open the last capture")
 
-        self._editor_window = EditorWindow(project_path=project_path or None)
-        self._editor_window.destroyed.connect(self._on_editor_destroyed)
-        self._editor_window.show()
-        self._editor_window.raise_()
-        self._editor_window.activateWindow()
+    def _copy_last_capture(self, _checked: bool = False) -> None:
+        if not self._capture_is_available():
+            self._notify("The last capture is no longer available")
+            return
+        mime_data = QMimeData()
+        mime_data.setUrls([QUrl.fromLocalFile(self._last_capture_path)])
+        self._app.clipboard().setMimeData(mime_data)
+        self._notify("Capture copied to the clipboard")
 
-    def _on_editor_destroyed(self) -> None:
-        self._editor_window = None
+    def _show_last_capture(self, _checked: bool = False) -> None:
+        if not self._capture_is_available():
+            self._notify("The last capture is no longer available")
+            return
+        try:
+            subprocess.Popen(
+                ["explorer.exe", f"/select,{self._last_capture_path}"],
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        except OSError as exc:
+            logger.error("Could not reveal capture: %s", exc)
+            self._notify("Could not show the last capture in its folder")
 
     def _start_recording(self) -> None:
         if self._state in {
@@ -296,10 +327,16 @@ class QtZumlyCaptureTray(QObject):
         self._cfg = load_general_config()
         os.makedirs(self._cfg["output_folder"], exist_ok=True)
         timestamp = time.strftime("%Y%m%d_%H%M%S")
-        out_path = os.path.join(
-            self._cfg["output_folder"],
-            f"{FILE_PREFIX}_{timestamp}.mp4",
-        )
+        millis = int(time.time_ns() // 1_000_000) % 1000
+        stem = f"{FILE_PREFIX}_{timestamp}_{millis:03d}"
+        out_path = os.path.join(self._cfg["output_folder"], f"{stem}.mp4")
+        suffix = 1
+        while os.path.exists(out_path):
+            out_path = os.path.join(
+                self._cfg["output_folder"],
+                f"{stem}_{suffix}.mp4",
+            )
+            suffix += 1
 
         if getattr(sys, "frozen", False):
             command = [sys.executable, "--headless-engine"]
@@ -356,8 +393,10 @@ class QtZumlyCaptureTray(QObject):
             )
         except OSError as exc:
             logger.error("Failed to start recording engine: %s", exc)
-            self._result_file = ""
+            self._cleanup_ipc_files()
             self._state = RecordingState.IDLE
+            self._update_tray("Ready (Ctrl+Shift+R)")
+            self._notify("Could not start the recording engine")
             return
 
         self._recording = True
@@ -498,13 +537,10 @@ class QtZumlyCaptureTray(QObject):
             pass
         process.wait()
         payload = self._read_result_payload(self._result_file, timeout=2.0)
-        project_path = ""
         return_code = int(process.returncode or 0)
-        if payload.get("status") == "success":
-            project_path = str(payload.get("projectPath", "") or "")
-        elif return_code == 0:
+        if payload.get("status") != "success" and return_code == 0:
             return_code = 1
-        self.recording_finished.emit(project_path, return_code)
+        self.recording_finished.emit(payload, return_code)
 
     @staticmethod
     def _read_result_payload(path: str, timeout: float) -> dict:
@@ -522,29 +558,29 @@ class QtZumlyCaptureTray(QObject):
         logger.warning("Recorder result payload was not available: %s", path)
         return {}
 
-    def _handle_recording_finished(self, project_path: str, return_code: int) -> None:
-        self._state = RecordingState.FINISHED
-        self._recording = False
-        self._stopping = False
-        self._process = None
-        for attribute in ("_stop_file", "_control_file", "_status_file"):
+    def _cleanup_ipc_files(self) -> None:
+        for attribute in (
+            "_stop_file",
+            "_control_file",
+            "_status_file",
+            "_result_file",
+        ):
             path = str(getattr(self, attribute, "") or "")
             if path:
                 try:
                     if os.path.exists(path):
                         os.remove(path)
                 except OSError:
-                    pass
+                    logger.debug("Could not remove recorder IPC file: %s", path)
             setattr(self, attribute, "")
 
-        result_file = self._result_file
-        self._result_file = ""
-        if result_file:
-            try:
-                if os.path.exists(result_file):
-                    os.remove(result_file)
-            except OSError:
-                pass
+    def _handle_recording_finished(self, payload: object, return_code: int) -> None:
+        result = payload if isinstance(payload, dict) else {}
+        self._state = RecordingState.FINISHED
+        self._recording = False
+        self._stopping = False
+        self._process = None
+        self._cleanup_ipc_files()
 
         if self._toggle_action is not None:
             self._toggle_action.setEnabled(True)
@@ -553,25 +589,29 @@ class QtZumlyCaptureTray(QObject):
 
         self._update_tray("Ready (Ctrl+Shift+R)")
 
-        if return_code == 0 and project_path and os.path.isfile(project_path):
-            if self._cfg.get("review_in_editor", True):
-                self._open_editor(project_path)
-                self._notify("Recording saved. Opening editor...")
+        media_path = str(result.get("mediaPath") or result.get("outputPath") or "")
+        if (
+            return_code == 0
+            and result.get("status") == "success"
+            and media_path
+            and os.path.isfile(media_path)
+        ):
+            self._last_capture_path = os.path.abspath(media_path)
+            self._set_capture_actions_enabled(True)
+            warning = str(result.get("warning", "") or "")
+            if warning:
+                logger.warning("Capture completed with warning: %s", warning)
+                self._notify(f"Recording saved. {warning}")
             else:
-                self._start_export(project_path)
-                self._notify("Recording saved. Exporting video...")
-        self._reregister_hotkey()
-
-    def _start_export(self, project_path: str) -> None:
-        if getattr(sys, "frozen", False):
-            command = [str(_ROOT_DIR / "export_app.exe"), "--project", project_path]
+                self._notify(f"Recording saved: {os.path.basename(media_path)}")
         else:
-            command = [sys.executable, str(_ROOT_DIR / "export_app.py"), "--project", project_path]
-        try:
-            subprocess.Popen(command, cwd=str(_ROOT_DIR))
-            self._update_tray(f"Exporting: {os.path.basename(project_path)}")
-        except OSError as exc:
-            logger.error("Failed to start exporter: %s", exc)
+            error = str(result.get("error", "") or "Recording engine did not publish a video")
+            recovery_path = str(result.get("recoveryPath", "") or "")
+            if recovery_path and os.path.isfile(recovery_path):
+                logger.warning("Completed recording remains recoverable at %s", recovery_path)
+            logger.error("Recording failed: %s", error)
+            self._notify(f"Recording failed: {error}")
+        self._reregister_hotkey()
 
     def _reregister_hotkey(self) -> None:
         if self._hotkey_thread is not None:

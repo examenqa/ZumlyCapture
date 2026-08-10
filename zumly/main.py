@@ -5,16 +5,16 @@ import os
 import sys
 import tempfile
 import time
+import uuid
 
-from zumly_capture.identity import FILE_PREFIX, PRODUCT_NAME, RUNTIME_DIRECTORY_NAME
+from zumly_capture.identity import FILE_PREFIX, PRODUCT_NAME
+from zumly_capture.session import CaptureSession, publish_recording
 
 from zumly.app.screen_recorder import ScreenRecorder
 from zumly.app.mouse_tracker import MouseTracker
 from zumly.app.click_tracker import ClickTracker
-from zumly.app.keyboard_tracker import KeyboardTracker
 from zumly.app.global_hotkeys import GlobalHotkeys
 from zumly.app.session_timing import RecordingState, SessionTimelineClock
-from zumly.app.activity_analyzer import analyze_activity
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
@@ -51,57 +51,19 @@ def _write_result_payload(result_file: str, payload: dict) -> bool:
         return False
 
 
-def _capture_project_bridge_path(recording_wall_time_ms: float, session_id: str) -> str:
-    """Return an ephemeral project bridge path for the tray/editor handoff.
-
-    The bridge is an implementation detail of the three-process architecture,
-    not a user-facing export. Keeping it under the runtime temp directory keeps
-    the configured video output folder limited to media the user asked for.
-    """
-    bridge_dir = os.path.join(
-        tempfile.gettempdir(),
-        RUNTIME_DIRECTORY_NAME,
-        "bridges",
-    )
-    os.makedirs(bridge_dir, exist_ok=True)
-    timestamp = int(recording_wall_time_ms)
-    safe_session_id = "".join(char for char in str(session_id) if char.isalnum())
-    return os.path.join(bridge_dir, f"capture_{timestamp}_{safe_session_id}_project.json")
-
-
-def _write_capture_project_bridge(path: str, payload: dict) -> None:
-    """Atomically publish the recorder-to-editor project bridge."""
-    directory = os.path.dirname(path)
-    temp_path = ""
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=directory,
-            prefix=f"{FILE_PREFIX}_session_",
-            suffix=".tmp",
-            delete=False,
-        ) as handle:
-            temp_path = handle.name
-            json.dump(payload, handle, indent=2)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp_path, path)
-    except Exception:
-        if temp_path:
-            try:
-                os.remove(temp_path)
-            except OSError:
-                pass
-        raise
-
-
-def _failure(result_file: str, message: str, code: int = 1) -> int:
+def _failure(
+    result_file: str,
+    message: str,
+    code: int = 1,
+    **details: object,
+) -> int:
     """Write a terminal failure payload and return the process exit code."""
     logging.error(message)
+    payload = {"status": "failed", "error": str(message), "returnCode": int(code)}
+    payload.update(details)
     _write_result_payload(
         result_file,
-        {"status": "failed", "error": str(message), "returnCode": int(code)},
+        payload,
     )
     return code
 
@@ -153,7 +115,6 @@ def _run(args: argparse.Namespace) -> int:
     # Trackers
     click_tracker = ClickTracker()
     mouse_tracker = MouseTracker(click_state_provider=click_tracker.is_button_down)
-    kbd_tracker = KeyboardTracker()
 
     # Setup Hotkey Tracker (Callback based)
     recording_toggled = [False]
@@ -199,7 +160,6 @@ def _run(args: argparse.Namespace) -> int:
     )
     click_tracker.start(SESSION_EPOCH, monitor_rect, timeline_clock=timeline_clock)
     mouse_tracker.start(SESSION_EPOCH, timeline_clock=timeline_clock)
-    kbd_tracker.start(SESSION_EPOCH)
     recording_wall_time_ms = time.time() * 1000.0
     if not args.stop_file:
         hotkey_tracker.register_record_hotkey()
@@ -283,7 +243,6 @@ def _run(args: argparse.Namespace) -> int:
     recorder.stop_recording()
     mouse_events = mouse_tracker.stop()
     click_events = click_tracker.stop()
-    kbd_events = kbd_tracker.stop()
     hotkey_tracker.unregister_record_hotkey()
     overlay.stop()
     recorder.stop_capture()
@@ -305,56 +264,65 @@ def _run(args: argparse.Namespace) -> int:
             f"Recording failed before a usable video was written: {recorder.recording_error}",
         )
 
-    logging.info("Recording stopped. Generating AI auto-zooms...")
-    keyframes = analyze_activity(
-        mouse_track=mouse_events,
-        monitor_rect=monitor_rect,
-        key_events=kbd_events,
-        click_events=click_events,
-    )
-
-    logging.info(f"Generated {len(keyframes)} zoom keyframes. Saving session state...")
-
-    import uuid
-    from zumly.app.models import RecordingSession
-
     session_id = str(uuid.uuid4())
     duration_ms = recorder.recording_duration_ms
-
-    session = RecordingSession(
-        id=session_id,
-        start_time=recording_wall_time_ms / 1000.0,
-        duration=duration_ms,
-        mouse_track=mouse_events,
-        keyframes=keyframes,
-        click_events=click_events,
-        frame_timestamps=recorder.frame_timestamps,
+    output_path = os.path.abspath(args.out)
+    capture_target = {
+        "kind": "monitor",
+        "monitorIndex": int(args.monitor),
+        "left": int(monitor_rect.get("left", 0)),
+        "top": int(monitor_rect.get("top", 0)),
+        "width": int(monitor_rect.get("width", 0)),
+        "height": int(monitor_rect.get("height", 0)),
+    }
+    session = CaptureSession(
+        session_id=session_id,
+        media_path=output_path,
+        capture_target=capture_target,
+        started_at_unix_ms=recording_wall_time_ms,
+        duration_ms=duration_ms,
+        paused_duration_ms=timeline_clock.paused_duration_ms,
+        pause_boundaries=[boundary.to_dict() for boundary in timeline_clock.pause_boundaries],
+        requested_fps=float(args.fps),
+        actual_fps=recorder.actual_fps,
         is_cfr=recorder.is_cfr,
+        capture_backend=recorder.backend,
+        frame_timestamps=recorder.frame_timestamps,
+        mouse_track=[event.to_dict() for event in mouse_events],
+        click_events=[event.to_dict() for event in click_events],
         capture_telemetry=recorder.capture_telemetry,
     )
 
-    data = json.loads(session.to_json())
-    data["monitorRect"] = monitor_rect
-    data["actualFps"] = recorder.actual_fps
-    data["videoPath"] = raw_video_path
-    data["outPath"] = args.out
-
-    project_path = _capture_project_bridge_path(recording_wall_time_ms, session_id)
-    _write_capture_project_bridge(project_path, data)
+    logging.info("Recording stopped. Publishing video to %s", output_path)
+    try:
+        published = publish_recording(raw_video_path, output_path, session)
+    except Exception as exc:
+        logging.exception("Could not publish the completed recording: %s", exc)
+        recovery_path = os.path.abspath(raw_video_path) if os.path.isfile(raw_video_path) else ""
+        return _failure(
+            args.result_file,
+            f"Could not save the completed recording: {exc}",
+            recoveryPath=recovery_path,
+        )
 
     payload = {
         "status": "success",
-        "projectPath": os.path.abspath(project_path),
-        "videoPath": os.path.abspath(raw_video_path),
-        "outputPath": os.path.abspath(args.out),
+        "mediaPath": published.media_path,
+        "outputPath": published.media_path,
+        "manifestPath": published.manifest_path,
         "sessionId": session_id,
         "durationMs": duration_ms,
         "returnCode": 0,
     }
+    if published.warning:
+        payload["warning"] = published.warning
     if not _write_result_payload(args.result_file, payload):
         return 1
 
-    logging.info(f"Session serialized to {project_path}")
+    if published.manifest_path:
+        logging.info("Capture manifest saved to %s", published.manifest_path)
+    if published.warning:
+        logging.warning(published.warning)
     logging.info("Force exiting to release WGC hooks...")
     return 0
 

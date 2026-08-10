@@ -19,6 +19,7 @@ analysis = Analysis(
     datas=app_datas,
     hiddenimports=[
         "zumly_capture",
+        "zumly_capture.session",
         "zumly.main",
         "zumly.app.qt_tray",
         "zumly.app.widgets.unified_settings_dialog",
@@ -31,7 +32,8 @@ analysis = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     # Product artifacts must not gain OpenCV or NumPy as mandatory runtime
-    # dependencies. Copied seed paths that still import NumPy are Phase 2 work.
+    # dependencies. Copied seed paths that still import NumPy remain
+    # transitional extraction work.
     excludes=["cv2", "numpy"],
     noarchive=False,
 )
