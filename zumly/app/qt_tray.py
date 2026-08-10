@@ -126,7 +126,7 @@ class QtZumlyCaptureTray(QObject):
     pause_toggle_requested = Signal()
     screenshot_requested = Signal()
     recording_finished = Signal(object, int)
-    engine_state_changed = Signal(str, int)
+    engine_state_changed = Signal(object)
 
     def __init__(self, app: QApplication, instance_guard: object | None = None) -> None:
         super().__init__()
@@ -187,6 +187,7 @@ class QtZumlyCaptureTray(QObject):
             RecordingState.RECORDING,
             RecordingState.PAUSED,
             RecordingState.STOPPING,
+            RecordingState.PROCESSING,
         }:
             self._notify(f"{PRODUCT_NAME} is already recording")
             return
@@ -280,6 +281,14 @@ class QtZumlyCaptureTray(QObject):
             self.toggle_requested.emit()
 
     def _on_toggle(self, _checked: bool = False) -> None:
+        if self._state == RecordingState.PROCESSING:
+            if not self._stopping and self._process is not None:
+                self._stopping = True
+                self._send_control("cancel")
+                self._update_tray("Cancelling Smart Zoom...")
+                if self._toggle_action is not None:
+                    self._toggle_action.setEnabled(False)
+            return
         if self._stopping:
             return
         if self._state == RecordingState.STARTING and self._process is None:
@@ -511,6 +520,7 @@ class QtZumlyCaptureTray(QObject):
             RecordingState.RECORDING,
             RecordingState.PAUSED,
             RecordingState.STOPPING,
+            RecordingState.PROCESSING,
         }:
             return
         self._state = RecordingState.STARTING
@@ -587,6 +597,16 @@ class QtZumlyCaptureTray(QObject):
             command += ["--microphone", microphone]
         if system_audio:
             command += ["--system-audio", system_audio]
+        if bool(self._cfg.get("smart_zoom_enabled", False)):
+            command += [
+                "--smart-zoom",
+                "--smart-zoom-level",
+                str(self._cfg.get("smart_zoom_level", 1.5)),
+            ]
+            if bool(self._cfg.get("render_cursor", False)):
+                command.append("--render-cursor")
+            if bool(self._cfg.get("render_clicks", True)):
+                command.append("--render-clicks")
 
         self._stop_file = os.path.join(
             tempfile.gettempdir(),
@@ -713,19 +733,16 @@ class QtZumlyCaptureTray(QObject):
     def _monitor_engine_state(self) -> None:
         """Poll worker acknowledgements without touching Qt from this thread."""
         process = self._process
-        last_seen = -1
-        last_state = ""
+        last_snapshot = ""
         while process is not None and process.poll() is None:
             payload = self._read_json_payload(self._status_file)
             try:
-                sequence = int(payload.get("sequence", -1))
-                state = str(payload.get("state", ""))
+                snapshot = json.dumps(payload, sort_keys=True) if payload.get("state") else ""
             except (TypeError, ValueError):
-                sequence, state = -1, ""
-            if state and (sequence > last_seen or state != last_state):
-                last_seen = sequence
-                last_state = state
-                self.engine_state_changed.emit(state, sequence)
+                snapshot = ""
+            if snapshot and snapshot != last_snapshot:
+                last_snapshot = snapshot
+                self.engine_state_changed.emit(dict(payload))
             time.sleep(0.05)
 
     @staticmethod
@@ -739,7 +756,16 @@ class QtZumlyCaptureTray(QObject):
         except (FileNotFoundError, PermissionError, json.JSONDecodeError, OSError):
             return {}
 
-    def _handle_engine_state(self, state_value: str, sequence: int) -> None:
+    def _handle_engine_state(self, payload: object, legacy_sequence: int | None = None) -> None:
+        if isinstance(payload, str):
+            payload = {"state": payload, "sequence": legacy_sequence or 0}
+        if not isinstance(payload, dict):
+            return
+        state_value = str(payload.get("state", ""))
+        try:
+            sequence = int(payload.get("sequence", -1))
+        except (TypeError, ValueError):
+            sequence = -1
         try:
             state = RecordingState(state_value)
         except ValueError:
@@ -753,6 +779,7 @@ class QtZumlyCaptureTray(QObject):
             RecordingState.RECORDING,
             RecordingState.PAUSED,
             RecordingState.STOPPING,
+            RecordingState.PROCESSING,
         }
         if state == RecordingState.RECORDING:
             self._stopping = False
@@ -762,6 +789,15 @@ class QtZumlyCaptureTray(QObject):
         elif state == RecordingState.STOPPING:
             self._stopping = True
             self._update_tray("Stopping recording...")
+        elif state == RecordingState.PROCESSING:
+            self._stopping = False
+            try:
+                progress = max(0, min(100, int(payload.get("progress", 0))))
+            except (TypeError, ValueError):
+                progress = 0
+            self._update_tray(f"Applying Smart Zoom... {progress}%")
+            if self._toggle_action is not None:
+                self._toggle_action.setEnabled(True)
 
     def _monitor_process(self) -> None:
         process = self._process
@@ -861,7 +897,12 @@ class QtZumlyCaptureTray(QObject):
             self._tray_icon.setToolTip(f"{PRODUCT_NAME} - {title}")
             if self._state == RecordingState.PAUSED:
                 self._tray_icon.setIcon(self._paused_tray_icon or get_brand_icon())
-            elif self._state in {RecordingState.STARTING, RecordingState.RECORDING, RecordingState.STOPPING}:
+            elif self._state in {
+                RecordingState.STARTING,
+                RecordingState.RECORDING,
+                RecordingState.STOPPING,
+                RecordingState.PROCESSING,
+            }:
                 self._tray_icon.setIcon(self._recording_tray_icon or get_brand_icon())
             else:
                 self._tray_icon.setIcon(self._idle_tray_icon or get_brand_icon())
@@ -871,8 +912,12 @@ class QtZumlyCaptureTray(QObject):
                 RecordingState.RECORDING,
                 RecordingState.PAUSED,
                 RecordingState.STOPPING,
+                RecordingState.PROCESSING,
             }
-            self._toggle_action.setText("Stop Recording" if active else "Start Recording")
+            if self._state == RecordingState.PROCESSING:
+                self._toggle_action.setText("Cancel Smart Zoom")
+            else:
+                self._toggle_action.setText("Stop Recording" if active else "Start Recording")
         if self._pause_action is not None:
             self._pause_action.setText(
                 "Resume Recording" if self._state == RecordingState.PAUSED else "Pause Recording"
@@ -892,7 +937,9 @@ class QtZumlyCaptureTray(QObject):
             )
 
     def _on_quit(self) -> None:
-        if self._state in {RecordingState.STARTING, RecordingState.RECORDING, RecordingState.PAUSED}:
+        if self._state == RecordingState.PROCESSING and self._process is not None:
+            self._send_control("cancel")
+        elif self._state in {RecordingState.STARTING, RecordingState.RECORDING, RecordingState.PAUSED}:
             self._stop_recording()
         if self._hotkey_thread is not None:
             self._hotkey_thread.stop()

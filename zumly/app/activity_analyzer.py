@@ -27,7 +27,6 @@ ZOOM_PRE_ROLL_MS = 500    # start generated zoom keyframes before the planned ca
 PAN_TRANSITION_MS = 400   # base duration for panning to new target while zoomed
 PAN_TRANSITION_MAX_MS = 700  # cap pan duration even for large distances
 PAN_MERGE_GAP_MS = 2200  # use pan only when clicks are too tight for a clean zoom-out/in cycle
-MAX_CHAIN_LENGTH = 4     # max clusters in a single pan chain before forcing a zoom-out
 MAX_CLUSTER_DURATION_MS = 8000  # split clusters that exceed this total span
 ANTICIPATION_MS = 400     # arrive this many ms *before* action starts so the viewer sees the trigger
 
@@ -349,9 +348,9 @@ def analyze_activity(
         # (hold period is just camera dwell — doesn't affect chaining)
         gap = curr_ci["start"] - prev_ci["end"]
 
-        if (gap < PAN_MERGE_GAP_MS
-                and len(current_chain) < MAX_CHAIN_LENGTH):
-            # Close enough and chain not too long → stay zoomed, pan
+        if gap < PAN_MERGE_GAP_MS:
+            # Close enough → stay zoomed and pan. Every eligible click cluster
+            # remains in the same continuous chain; there is no arbitrary cap.
             current_chain.append(ci_idx)
         else:
             chains.append(current_chain)

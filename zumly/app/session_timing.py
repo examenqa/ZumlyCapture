@@ -18,6 +18,7 @@ class RecordingState(str, Enum):
     RECORDING = "recording"
     PAUSED = "paused"
     STOPPING = "stopping"
+    PROCESSING = "processing"
     FINISHED = "finished"
 
 

@@ -36,6 +36,9 @@ class CaptureSession:
     click_events: list[dict[str, Any]] = field(default_factory=list)
     capture_telemetry: dict[str, Any] = field(default_factory=dict)
     audio: dict[str, Any] = field(default_factory=dict)
+    smart_zoom: dict[str, Any] = field(
+        default_factory=lambda: {"state": "not_processed", "keyframes": []}
+    )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -56,10 +59,7 @@ class CaptureSession:
             "clickEvents": list(self.click_events),
             "captureTelemetry": dict(self.capture_telemetry),
             "audio": dict(self.audio),
-            "smartZoom": {
-                "state": "not_processed",
-                "keyframes": [],
-            },
+            "smartZoom": dict(self.smart_zoom),
         }
 
 

@@ -25,6 +25,7 @@ analysis = Analysis(
         "zumly_capture.settings",
         "zumly_capture.settings_dialog",
         "zumly_capture.screenshot",
+        "zumly_capture.smart_zoom",
         "zumly_capture.wgc",
         "windows_capture.windows_capture",
         "zumly.main",

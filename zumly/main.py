@@ -10,6 +10,7 @@ import uuid
 from zumly_capture.audio import AudioCapture, cleanup_audio_tracks, mux_audio_tracks
 from zumly_capture.identity import FILE_PREFIX, PRODUCT_NAME
 from zumly_capture.session import CaptureSession, publish_recording
+from zumly_capture.smart_zoom import render_smart_zoom
 
 from zumly.app.screen_recorder import ScreenRecorder
 from zumly.app.mouse_tracker import MouseTracker
@@ -80,7 +81,7 @@ def _read_control_payload(path: str, last_sequence: int) -> tuple[int, str]:
         action = str(payload.get("action", "")).strip().lower()
     except (FileNotFoundError, PermissionError, OSError, ValueError, TypeError, json.JSONDecodeError):
         return last_sequence, ""
-    if sequence <= last_sequence or action not in {"pause", "resume", "stop"}:
+    if sequence <= last_sequence or action not in {"pause", "resume", "stop", "cancel"}:
         return last_sequence, ""
     return sequence, action
 
@@ -90,15 +91,18 @@ def _write_status_payload(
     sequence: int,
     state: RecordingState,
     clock: SessionTimelineClock,
+    **details: object,
 ) -> None:
+    payload = {
+        "sequence": int(sequence),
+        "state": state.value,
+        "activeDurationMs": round(clock.active_time_ms(), 3),
+        "pausedDurationMs": round(clock.paused_duration_ms, 3),
+    }
+    payload.update(details)
     _write_result_payload(
         path,
-        {
-            "sequence": int(sequence),
-            "state": state.value,
-            "activeDurationMs": round(clock.active_time_ms(), 3),
-            "pausedDurationMs": round(clock.paused_duration_ms, 3),
-        },
+        payload,
     )
 
 
@@ -296,12 +300,6 @@ def _run(args: argparse.Namespace) -> int:
     hotkey_tracker.unregister_record_hotkey()
     overlay.stop()
     recorder.stop_capture()
-    _write_status_payload(
-        args.status_file,
-        last_control_sequence,
-        RecordingState.FINISHED,
-        timeline_clock,
-    )
     if args.stop_file:
         try:
             os.remove(args.stop_file)
@@ -356,6 +354,79 @@ def _run(args: argparse.Namespace) -> int:
         warnings.append("The selected audio device did not produce a usable track.")
     cleanup_audio_tracks(audio_tracks)
 
+    smart_zoom_manifest: dict[str, object] = {
+        "state": "not_processed",
+        "keyframes": [],
+    }
+    if args.smart_zoom:
+        smart_zoom_level = max(1.1, min(3.0, float(args.smart_zoom_level)))
+        render_sequence = [last_control_sequence]
+
+        def smart_zoom_cancelled() -> bool:
+            sequence, action = _read_control_payload(
+                args.control_file,
+                render_sequence[0],
+            )
+            if action:
+                render_sequence[0] = sequence
+            return action == "cancel"
+
+        def smart_zoom_progress(progress: int) -> None:
+            _write_status_payload(
+                args.status_file,
+                render_sequence[0],
+                RecordingState.PROCESSING,
+                timeline_clock,
+                phase="smart_zoom",
+                progress=max(0, min(100, int(progress))),
+            )
+
+        smart_zoom_progress(0)
+        render_handle = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
+        render_path = render_handle.name
+        render_handle.close()
+        try:
+            os.remove(render_path)
+        except OSError:
+            pass
+        source_before_render = publication_source
+        outcome = render_smart_zoom(
+            source_before_render,
+            render_path,
+            mouse_events,
+            click_events,
+            capture_rect,
+            duration_ms,
+            recorder.actual_fps or float(args.fps),
+            zoom_level=smart_zoom_level,
+            render_cursor=bool(args.render_cursor),
+            render_clicks=bool(args.render_clicks),
+            progress_callback=smart_zoom_progress,
+            cancel_callback=smart_zoom_cancelled,
+        )
+        smart_zoom_manifest = {
+            "state": outcome.state,
+            "keyframes": [keyframe.to_dict() for keyframe in outcome.keyframes],
+            "renderCursor": bool(args.render_cursor),
+            "renderClicks": bool(args.render_clicks),
+            "zoomLevel": smart_zoom_level,
+        }
+        if outcome.error:
+            smart_zoom_manifest["error"] = outcome.error
+        if outcome.state == "processed" and outcome.output_path:
+            publication_source = outcome.output_path
+            if source_before_render != raw_video_path:
+                try:
+                    os.remove(source_before_render)
+                except OSError:
+                    pass
+        elif outcome.state == "cancelled":
+            warnings.append("Smart Zoom was cancelled; the unprocessed recording was saved.")
+        elif outcome.state == "failed":
+            warnings.append("Smart Zoom could not be applied; the unprocessed recording was saved.")
+            if outcome.error:
+                logging.warning("Smart Zoom render failed: %s", outcome.error)
+
     session = CaptureSession(
         session_id=session_id,
         media_path=output_path,
@@ -373,6 +444,7 @@ def _run(args: argparse.Namespace) -> int:
         click_events=[event.to_dict() for event in click_events],
         capture_telemetry=recorder.capture_telemetry,
         audio=audio_manifest,
+        smart_zoom=smart_zoom_manifest,
     )
 
     logging.info("Recording stopped. Publishing video to %s", output_path)
@@ -406,6 +478,13 @@ def _run(args: argparse.Namespace) -> int:
         warnings.append(published.warning)
     if warnings:
         payload["warning"] = " ".join(warnings)
+    _write_status_payload(
+        args.status_file,
+        last_control_sequence,
+        RecordingState.FINISHED,
+        timeline_clock,
+        progress=100 if smart_zoom_manifest.get("state") == "processed" else 0,
+    )
     if not _write_result_payload(args.result_file, payload):
         return 1
 
@@ -441,6 +520,27 @@ def main() -> int:
     parser.add_argument("--microphone", default="", help="DirectShow microphone device")
     parser.add_argument("--system-audio", default="", help="DirectShow loopback audio device")
     parser.add_argument(
+        "--smart-zoom",
+        action="store_true",
+        help="Apply automatic click-driven Smart Zoom after recording",
+    )
+    parser.add_argument(
+        "--smart-zoom-level",
+        type=float,
+        default=1.5,
+        help="Smart Zoom scale (1.1 to 3.0)",
+    )
+    parser.add_argument(
+        "--render-cursor",
+        action="store_true",
+        help="Render the captured cursor as an optional video layer",
+    )
+    parser.add_argument(
+        "--render-clicks",
+        action="store_true",
+        help="Render click indicators as an optional video layer",
+    )
+    parser.add_argument(
         "--duration",
         "-d",
         type=float,
@@ -463,7 +563,7 @@ def main() -> int:
         "--control-file",
         type=str,
         default="",
-        help="Atomic sequenced pause/resume/stop command payload",
+        help="Atomic sequenced pause/resume/stop/cancel command payload",
     )
     parser.add_argument(
         "--status-file",
