@@ -6,6 +6,7 @@ import sys
 import tempfile
 import time
 import uuid
+from dataclasses import dataclass
 
 from zumly_capture.audio import AudioCapture, cleanup_audio_tracks, mux_audio_tracks
 from zumly_capture.identity import FILE_PREFIX, PRODUCT_NAME
@@ -16,6 +17,7 @@ from zumly.app.screen_recorder import ScreenRecorder
 from zumly.app.mouse_tracker import MouseTracker
 from zumly.app.click_tracker import ClickTracker
 from zumly.app.global_hotkeys import GlobalHotkeys
+from zumly.app.recording_overlay import RecordingOverlay
 from zumly.app.session_timing import RecordingState, SessionTimelineClock
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -106,6 +108,220 @@ def _write_status_payload(
     )
 
 
+@dataclass(slots=True)
+class _RecordingArtifacts:
+    recorder: ScreenRecorder
+    timeline_clock: SessionTimelineClock
+    raw_video_path: str
+    mouse_events: list[object]
+    click_events: list[object]
+    audio_tracks: list[object]
+    audio_lead_ms: float
+    recording_wall_time_ms: float
+    last_control_sequence: int
+
+
+def _record_media(
+    args: argparse.Namespace,
+    target_kind: str,
+    capture_rect: dict,
+) -> _RecordingArtifacts:
+    """Record media and always release every native capture resource."""
+    click_tracker = ClickTracker()
+    mouse_tracker = MouseTracker(click_state_provider=click_tracker.is_button_down)
+    recording_toggled = [False]
+    pause_toggled = [False]
+
+    def on_hotkey_triggered() -> None:
+        recording_toggled[0] = True
+
+    def on_pause_hotkey_triggered() -> None:
+        pause_toggled[0] = True
+
+    hotkey_tracker = GlobalHotkeys(
+        callback=on_hotkey_triggered,
+        pause_callback=on_pause_hotkey_triggered,
+    )
+    timeline_clock = SessionTimelineClock()
+    recorder = ScreenRecorder(
+        recording_finished_cb=lambda _path: None,
+        capture_backend_changed_cb=lambda _backend: None,
+        timeline_clock=timeline_clock,
+    )
+    audio_capture = AudioCapture(
+        [str(args.microphone or ""), str(args.system_audio or "")]
+    )
+    overlay: RecordingOverlay | None = None
+    raw_video_path = ""
+    mouse_events: list[object] = []
+    click_events: list[object] = []
+    audio_tracks: list[object] = []
+    audio_lead_ms = 0.0
+    recording_wall_time_ms = 0.0
+    last_control_sequence = 0
+    capture_started = False
+    recording_started = False
+    mouse_started = False
+    click_started = False
+    audio_started = False
+    hotkey_registered = False
+
+    def cleanup(label: str, callback) -> None:
+        try:
+            callback()
+        except Exception as exc:
+            logging.warning("Could not clean up %s: %s", label, exc)
+
+    try:
+        logging.info("Starting %s capture at %s FPS...", target_kind, args.fps)
+        capture_started = True
+        if target_kind == "window":
+            recorder.start_capture_window(int(args.window_hwnd), args.fps)
+        elif target_kind == "region":
+            recorder.start_capture_region(capture_rect, args.fps)
+        else:
+            recorder.start_capture(args.monitor, args.fps)
+
+        time.sleep(2.0)
+        raw_video_path = recorder.prepare_recording()
+        audio_started = True
+        audio_capture.start()
+        if args.microphone or args.system_audio:
+            time.sleep(0.25)
+        session_epoch = time.perf_counter()
+        audio_lead_ms = max(0.0, (session_epoch - audio_capture.started_at) * 1000.0)
+        recording_started = True
+        recorder.start_recording(
+            session_epoch=session_epoch,
+            timeline_clock=timeline_clock,
+        )
+        click_started = True
+        click_tracker.start(session_epoch, capture_rect, timeline_clock=timeline_clock)
+        mouse_started = True
+        mouse_tracker.start(session_epoch, timeline_clock=timeline_clock)
+        recording_wall_time_ms = time.time() * 1000.0
+        if not args.stop_file:
+            hotkey_registered = True
+            hotkey_tracker.register_record_hotkey()
+
+        overlay = RecordingOverlay(capture_rect)
+        overlay.start()
+        _write_status_payload(
+            args.status_file,
+            last_control_sequence,
+            RecordingState.RECORDING,
+            timeline_clock,
+        )
+
+        logging.info("Recording started. Outputting raw video to: %s", raw_video_path)
+        if args.duration > 0:
+            logging.info("Recording will stop automatically after %s seconds.", args.duration)
+        else:
+            logging.info("Press CTRL+SHIFT+R to stop recording.")
+
+        try:
+            while True:
+                time.sleep(0.1)
+                sequence, action = _read_control_payload(
+                    args.control_file,
+                    last_control_sequence,
+                )
+                if action:
+                    last_control_sequence = sequence
+                    if action == "pause":
+                        if recorder.pause_recording():
+                            overlay.set_paused(True)
+                    elif action == "resume":
+                        if recorder.resume_recording():
+                            overlay.set_paused(False)
+                    elif action == "stop":
+                        _write_status_payload(
+                            args.status_file,
+                            sequence,
+                            RecordingState.STOPPING,
+                            timeline_clock,
+                        )
+                        logging.info("Stop command received. Stopping recording...")
+                        break
+                    _write_status_payload(
+                        args.status_file,
+                        sequence,
+                        recorder.recording_state,
+                        timeline_clock,
+                    )
+                if args.stop_file and os.path.exists(args.stop_file):
+                    logging.info("Stop file detected. Stopping recording...")
+                    break
+                if args.duration > 0 and timeline_clock.active_seconds() >= args.duration:
+                    logging.info("Reached duration of %ss. Stopping recording...", args.duration)
+                    break
+                if recording_toggled[0]:
+                    logging.info("Hotkey pressed. Stopping recording...")
+                    break
+                if pause_toggled[0]:
+                    pause_toggled[0] = False
+                    if recorder.is_paused:
+                        if recorder.resume_recording():
+                            overlay.set_paused(False)
+                    elif recorder.pause_recording():
+                        overlay.set_paused(True)
+                    _write_status_payload(
+                        args.status_file,
+                        last_control_sequence,
+                        recorder.recording_state,
+                        timeline_clock,
+                    )
+        except KeyboardInterrupt:
+            logging.info("Ctrl+C pressed. Stopping recording...")
+    finally:
+        failed = sys.exc_info()[0] is not None
+        if recording_started:
+            cleanup("video recording", recorder.stop_recording)
+        if mouse_started:
+            def stop_mouse() -> None:
+                nonlocal mouse_events
+                mouse_events = mouse_tracker.stop()
+
+            cleanup("mouse tracker", stop_mouse)
+        if click_started:
+            def stop_clicks() -> None:
+                nonlocal click_events
+                click_events = click_tracker.stop()
+
+            cleanup("click tracker", stop_clicks)
+        if audio_started:
+            def stop_audio() -> None:
+                nonlocal audio_tracks
+                audio_tracks = audio_capture.stop()
+
+            cleanup("audio capture", stop_audio)
+        if hotkey_registered:
+            cleanup("recording hotkey", hotkey_tracker.unregister_record_hotkey)
+        if overlay is not None:
+            cleanup("recording overlay", overlay.stop)
+        if capture_started:
+            cleanup("screen capture", recorder.stop_capture)
+        if args.stop_file:
+            try:
+                os.remove(args.stop_file)
+            except OSError:
+                pass
+        if failed and audio_tracks:
+            cleanup("temporary audio tracks", lambda: cleanup_audio_tracks(audio_tracks))
+
+    return _RecordingArtifacts(
+        recorder=recorder,
+        timeline_clock=timeline_clock,
+        raw_video_path=raw_video_path,
+        mouse_events=mouse_events,
+        click_events=click_events,
+        audio_tracks=audio_tracks,
+        audio_lead_ms=audio_lead_ms,
+        recording_wall_time_ms=recording_wall_time_ms,
+        last_control_sequence=last_control_sequence,
+    )
+
+
 def _run(args: argparse.Namespace) -> int:
     target_kind = str(args.target_kind or "monitor").lower()
     capture_rect: dict = {}
@@ -153,158 +369,16 @@ def _run(args: argparse.Namespace) -> int:
         }
     )
 
-    # Trackers
-    click_tracker = ClickTracker()
-    mouse_tracker = MouseTracker(click_state_provider=click_tracker.is_button_down)
-
-    # Setup Hotkey Tracker (Callback based)
-    recording_toggled = [False]
-    pause_toggled = [False]
-
-    def on_hotkey_triggered():
-        recording_toggled[0] = True
-
-    def on_pause_hotkey_triggered():
-        pause_toggled[0] = True
-
-    hotkey_tracker = GlobalHotkeys(
-        callback=on_hotkey_triggered,
-        pause_callback=on_pause_hotkey_triggered,
-    )
-
-    # Initialize recorder
-    def on_recording_finished(path: str) -> None:
-        pass
-
-    def on_capture_backend_changed(backend: str) -> None:
-        pass
-
-    timeline_clock = SessionTimelineClock()
-    recorder = ScreenRecorder(
-        recording_finished_cb=on_recording_finished,
-        capture_backend_changed_cb=on_capture_backend_changed,
-        timeline_clock=timeline_clock,
-    )
-
-    logging.info("Starting %s capture at %s FPS...", target_kind, args.fps)
-    if target_kind == "window":
-        recorder.start_capture_window(int(args.window_hwnd), args.fps)
-    elif target_kind == "region":
-        recorder.start_capture_region(capture_rect, args.fps)
-    else:
-        recorder.start_capture(args.monitor, args.fps)
-
-    # Let capture spin up
-    time.sleep(2.0)
-
-    # Complete all potentially blocking preparation before defining time zero.
-    raw_video_path = recorder.prepare_recording()
-    audio_capture = AudioCapture(
-        [str(args.microphone or ""), str(args.system_audio or "")]
-    )
-    audio_capture.start()
-    if args.microphone or args.system_audio:
-        time.sleep(0.25)
-    SESSION_EPOCH = time.perf_counter()
-    audio_lead_ms = max(0.0, (SESSION_EPOCH - audio_capture.started_at) * 1000.0)
-    recorder.start_recording(
-        session_epoch=SESSION_EPOCH,
-        timeline_clock=timeline_clock,
-    )
-    click_tracker.start(SESSION_EPOCH, capture_rect, timeline_clock=timeline_clock)
-    mouse_tracker.start(SESSION_EPOCH, timeline_clock=timeline_clock)
-    recording_wall_time_ms = time.time() * 1000.0
-    if not args.stop_file:
-        hotkey_tracker.register_record_hotkey()
-
-    from zumly.app.recording_overlay import RecordingOverlay
-
-    overlay = RecordingOverlay(capture_rect)
-    overlay.start()
-    last_control_sequence = 0
-    _write_status_payload(
-        args.status_file,
-        last_control_sequence,
-        RecordingState.RECORDING,
-        timeline_clock,
-    )
-
-    logging.info(f"Recording started. Outputting raw video to: {raw_video_path}")
-    if args.duration > 0:
-        logging.info(f"Recording will stop automatically after {args.duration} seconds.")
-    else:
-        logging.info("Press CTRL+SHIFT+R to stop recording.")
-
-    try:
-        while True:
-            time.sleep(0.1)
-            sequence, action = _read_control_payload(
-                args.control_file,
-                last_control_sequence,
-            )
-            if action:
-                last_control_sequence = sequence
-                if action == "pause":
-                    if recorder.pause_recording():
-                        overlay.set_paused(True)
-                elif action == "resume":
-                    if recorder.resume_recording():
-                        overlay.set_paused(False)
-                elif action == "stop":
-                    _write_status_payload(
-                        args.status_file,
-                        sequence,
-                        RecordingState.STOPPING,
-                        timeline_clock,
-                    )
-                    logging.info("Stop command received. Stopping recording...")
-                    break
-                _write_status_payload(
-                    args.status_file,
-                    sequence,
-                    recorder.recording_state,
-                    timeline_clock,
-                )
-            if args.stop_file and os.path.exists(args.stop_file):
-                logging.info("Stop file detected. Stopping recording...")
-                break
-            if args.duration > 0 and timeline_clock.active_seconds() >= args.duration:
-                logging.info(f"Reached duration of {args.duration}s. Stopping recording...")
-                break
-            if recording_toggled[0]:
-                logging.info("Hotkey pressed. Stopping recording...")
-                break
-            if pause_toggled[0]:
-                pause_toggled[0] = False
-                if recorder.is_paused:
-                    if recorder.resume_recording():
-                        overlay.set_paused(False)
-                else:
-                    if recorder.pause_recording():
-                        overlay.set_paused(True)
-                _write_status_payload(
-                    args.status_file,
-                    last_control_sequence,
-                    recorder.recording_state,
-                    timeline_clock,
-                )
-    except KeyboardInterrupt:
-        logging.info("Ctrl+C pressed. Stopping recording...")
-
-    # Freeze the shared timeline before stopping input hooks so shutdown time
-    # cannot leak into the serialized media duration.
-    recorder.stop_recording()
-    mouse_events = mouse_tracker.stop()
-    click_events = click_tracker.stop()
-    audio_tracks = audio_capture.stop()
-    hotkey_tracker.unregister_record_hotkey()
-    overlay.stop()
-    recorder.stop_capture()
-    if args.stop_file:
-        try:
-            os.remove(args.stop_file)
-        except OSError:
-            pass
+    artifacts = _record_media(args, target_kind, capture_rect)
+    recorder = artifacts.recorder
+    timeline_clock = artifacts.timeline_clock
+    raw_video_path = artifacts.raw_video_path
+    mouse_events = artifacts.mouse_events
+    click_events = artifacts.click_events
+    audio_tracks = artifacts.audio_tracks
+    audio_lead_ms = artifacts.audio_lead_ms
+    recording_wall_time_ms = artifacts.recording_wall_time_ms
+    last_control_sequence = artifacts.last_control_sequence
 
     if recorder.recording_error:
         cleanup_audio_tracks(audio_tracks)
@@ -381,51 +455,70 @@ def _run(args: argparse.Namespace) -> int:
                 progress=max(0, min(100, int(progress))),
             )
 
-        smart_zoom_progress(0)
-        render_handle = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
-        render_path = render_handle.name
-        render_handle.close()
-        try:
-            os.remove(render_path)
-        except OSError:
-            pass
         source_before_render = publication_source
-        outcome = render_smart_zoom(
-            source_before_render,
-            render_path,
-            mouse_events,
-            click_events,
-            capture_rect,
-            duration_ms,
-            recorder.actual_fps or float(args.fps),
-            zoom_level=smart_zoom_level,
-            render_cursor=bool(args.render_cursor),
-            render_clicks=bool(args.render_clicks),
-            progress_callback=smart_zoom_progress,
-            cancel_callback=smart_zoom_cancelled,
-        )
-        smart_zoom_manifest = {
-            "state": outcome.state,
-            "keyframes": [keyframe.to_dict() for keyframe in outcome.keyframes],
-            "renderCursor": bool(args.render_cursor),
-            "renderClicks": bool(args.render_clicks),
-            "zoomLevel": smart_zoom_level,
-        }
-        if outcome.error:
-            smart_zoom_manifest["error"] = outcome.error
-        if outcome.state == "processed" and outcome.output_path:
-            publication_source = outcome.output_path
-            if source_before_render != raw_video_path:
+        render_path = ""
+        try:
+            smart_zoom_progress(0)
+            render_handle = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
+            render_path = render_handle.name
+            render_handle.close()
+            try:
+                os.remove(render_path)
+            except OSError:
+                pass
+            outcome = render_smart_zoom(
+                source_before_render,
+                render_path,
+                mouse_events,
+                click_events,
+                capture_rect,
+                duration_ms,
+                recorder.actual_fps or float(args.fps),
+                zoom_level=smart_zoom_level,
+                render_cursor=bool(args.render_cursor),
+                render_clicks=bool(args.render_clicks),
+                progress_callback=smart_zoom_progress,
+                cancel_callback=smart_zoom_cancelled,
+            )
+            smart_zoom_manifest = {
+                "state": outcome.state,
+                "keyframes": [keyframe.to_dict() for keyframe in outcome.keyframes],
+                "renderCursor": bool(args.render_cursor),
+                "renderClicks": bool(args.render_clicks),
+                "zoomLevel": smart_zoom_level,
+            }
+            if outcome.error:
+                smart_zoom_manifest["error"] = outcome.error
+            if outcome.state == "processed" and outcome.output_path:
+                publication_source = outcome.output_path
+                if source_before_render != raw_video_path:
+                    try:
+                        os.remove(source_before_render)
+                    except OSError:
+                        pass
+            elif outcome.state == "cancelled":
+                warnings.append("Smart Zoom was cancelled; the unprocessed recording was saved.")
+            elif outcome.state == "failed":
+                warnings.append("Smart Zoom could not be applied; the unprocessed recording was saved.")
+                if outcome.error:
+                    logging.warning("Smart Zoom render failed: %s", outcome.error)
+        except Exception as exc:
+            publication_source = source_before_render
+            if render_path:
                 try:
-                    os.remove(source_before_render)
+                    os.remove(render_path)
                 except OSError:
                     pass
-        elif outcome.state == "cancelled":
-            warnings.append("Smart Zoom was cancelled; the unprocessed recording was saved.")
-        elif outcome.state == "failed":
+            smart_zoom_manifest = {
+                "state": "failed",
+                "keyframes": [],
+                "renderCursor": bool(args.render_cursor),
+                "renderClicks": bool(args.render_clicks),
+                "zoomLevel": smart_zoom_level,
+                "error": str(exc),
+            }
             warnings.append("Smart Zoom could not be applied; the unprocessed recording was saved.")
-            if outcome.error:
-                logging.warning("Smart Zoom render failed: %s", outcome.error)
+            logging.exception("Smart Zoom orchestration failed; preserving source video: %s", exc)
 
     session = CaptureSession(
         session_id=session_id,

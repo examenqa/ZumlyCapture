@@ -453,12 +453,20 @@ class QtZumlyCaptureTray(QObject):
         self._schedule_screenshot(rect)
 
     def _screenshot_active_window(self, _checked: bool = False) -> None:
+        delay = int(self._cfg.get("screenshot_delay_seconds", 0) or 0)
+        if delay > 0:
+            self._notify(f"Screenshot in {delay} seconds…")
+        # Resolve foreground state after the tray menu has closed. Resolving it
+        # synchronously here can select Qt's transient popup instead of the app.
+        QTimer.singleShot(max(180, delay * 1000), self._capture_active_window_screenshot)
+
+    def _capture_active_window_screenshot(self) -> None:
         handle = foreground_window_handle()
         rect = get_window_rect(handle) if handle else None
         if rect is None:
             self._notify("Could not identify the active window")
             return
-        self._schedule_screenshot(rect)
+        self._capture_screenshot(rect)
 
     def _select_region(self, callback) -> None:
         if self._region_selector is not None:

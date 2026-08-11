@@ -255,23 +255,24 @@ def render_smart_zoom(
     cancel_callback: CancelCallback | None = None,
 ) -> SmartZoomResult:
     """Analyze every click and render Smart Zoom without risking source media."""
-    keyframes = analyze_activity(
-        mouse_track,
-        capture_rect,
-        click_events=click_events,
-        max_clusters=None,
-        zoom_level=float(zoom_level),
-    )
-    if not keyframes:
-        return SmartZoomResult(state="no_activity")
-    if cancel_callback is not None and cancel_callback():
-        return SmartZoomResult(state="cancelled", keyframes=keyframes)
-
+    keyframes: list[ZoomKeyframe] = []
     cursor_path = ""
     filter_path = ""
     process: subprocess.Popen[str] | None = None
     last_progress = -1
     try:
+        keyframes = analyze_activity(
+            mouse_track,
+            capture_rect,
+            click_events=click_events,
+            max_clusters=None,
+            zoom_level=float(zoom_level),
+        )
+        if not keyframes:
+            return SmartZoomResult(state="no_activity")
+        if cancel_callback is not None and cancel_callback():
+            return SmartZoomResult(state="cancelled", keyframes=keyframes)
+
         with tempfile.NamedTemporaryFile(suffix=".filter", delete=False) as handle:
             filter_path = handle.name
         command = [ffmpeg_exe(), "-y", "-hide_banner", "-loglevel", "error", "-i", input_path]

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import ctypes
+from ctypes import wintypes
+
 from PySide6.QtCore import QPoint, QRect, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QKeyEvent, QMouseEvent, QPainter, QPen
+from PySide6.QtGui import QColor, QCursor, QKeyEvent, QMouseEvent, QPainter, QPen
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QDialog,
@@ -14,6 +17,27 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+
+def physical_cursor_position() -> QPoint:
+    """Return the pointer in physical desktop pixels on Windows."""
+    point = wintypes.POINT()
+    try:
+        if ctypes.windll.user32.GetPhysicalCursorPos(ctypes.byref(point)):
+            return QPoint(int(point.x), int(point.y))
+    except (AttributeError, OSError):
+        pass
+    return QCursor.pos()
+
+
+def physical_selection_rect(origin: QPoint, current: QPoint) -> dict[str, int]:
+    """Build the half-open physical-pixel rectangle consumed by MSS/WGC."""
+    return {
+        "left": min(origin.x(), current.x()),
+        "top": min(origin.y(), current.y()),
+        "width": abs(current.x() - origin.x()),
+        "height": abs(current.y() - origin.y()),
+    }
 
 
 class WindowPickerDialog(QDialog):
@@ -64,6 +88,8 @@ class RegionSelector(QWidget):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self._origin: QPoint | None = None
         self._current: QPoint | None = None
+        self._physical_origin: QPoint | None = None
+        self._physical_current: QPoint | None = None
 
     def begin(self) -> None:
         screens = self.screen().virtualSiblings() if self.screen() is not None else []
@@ -109,30 +135,32 @@ class RegionSelector(QWidget):
         if event.button() == Qt.MouseButton.LeftButton:
             self._origin = event.position().toPoint()
             self._current = self._origin
+            self._physical_origin = physical_cursor_position()
+            self._physical_current = self._physical_origin
             self.update()
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         if self._origin is not None:
             self._current = event.position().toPoint()
+            self._physical_current = physical_cursor_position()
             self.update()
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         if event.button() != Qt.MouseButton.LeftButton:
             return
         self._current = event.position().toPoint()
+        self._physical_current = physical_cursor_position()
         selection = self.selection_rect()
         if selection.width() < 8 or selection.height() < 8:
             self._origin = None
             self._current = None
+            self._physical_origin = None
+            self._physical_current = None
             self.update()
             return
-        top_left = self.mapToGlobal(selection.topLeft())
-        payload = {
-            "left": top_left.x(),
-            "top": top_left.y(),
-            "width": selection.width(),
-            "height": selection.height(),
-        }
+        if self._physical_origin is None or self._physical_current is None:
+            return
+        payload = physical_selection_rect(self._physical_origin, self._physical_current)
         self.hide()
         QTimer.singleShot(160, lambda: self.region_selected.emit(payload))
 

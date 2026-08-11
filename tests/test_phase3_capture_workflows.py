@@ -1,13 +1,22 @@
+import argparse
 import json
 import ctypes
 from pathlib import Path
 
+import pytest
 from PIL import Image
+from PySide6.QtCore import QPoint
+from PySide6.QtWidgets import QApplication
 
-from zumly.app.qt_tray import MOD_CONTROL, MOD_SHIFT, _parse_hotkey
+from zumly import main as capture_main
+from zumly.app import qt_tray
+from zumly.app.qt_tray import MOD_CONTROL, MOD_SHIFT, QtZumlyCaptureTray, _parse_hotkey
 from zumly_capture import screenshot
+from zumly_capture import settings_dialog
 from zumly_capture.audio import _active_wall_segments, parse_dshow_audio_devices
+from zumly_capture.capture_ui import physical_selection_rect
 from zumly_capture.settings import load_settings, normalize_settings, save_settings
+from zumly_capture.settings_dialog import CaptureSettingsDialog
 from zumly_capture.wgc import NativeFrameBuffer
 
 
@@ -79,6 +88,73 @@ def test_hotkey_parser_supports_letters_and_function_keys() -> None:
     assert _parse_hotkey("Alt+F9") == (0x0001, 0x78)
 
 
+def test_region_selection_uses_physical_desktop_coordinates() -> None:
+    assert physical_selection_rect(QPoint(2400, -120), QPoint(1200, 780)) == {
+        "left": 1200,
+        "top": -120,
+        "width": 1200,
+        "height": 900,
+    }
+
+
+def test_active_window_is_resolved_after_tray_menu_closes(monkeypatch) -> None:
+    tray = QtZumlyCaptureTray(object())
+    tray._cfg = {"screenshot_delay_seconds": 0}
+    callbacks: list[object] = []
+    captures: list[dict] = []
+    foreground_calls: list[bool] = []
+    monkeypatch.setattr(
+        qt_tray.QTimer,
+        "singleShot",
+        lambda delay, callback: callbacks.append((delay, callback)),
+    )
+    monkeypatch.setattr(
+        qt_tray,
+        "foreground_window_handle",
+        lambda: foreground_calls.append(True) or 123,
+    )
+    monkeypatch.setattr(
+        qt_tray,
+        "get_window_rect",
+        lambda handle: {"left": handle, "top": 0, "width": 10, "height": 10},
+    )
+    tray._capture_screenshot = captures.append
+
+    tray._screenshot_active_window()
+
+    assert foreground_calls == []
+    assert callbacks[0][0] == 180
+    callbacks[0][1]()
+    assert foreground_calls == [True]
+    assert captures[0]["left"] == 123
+    tray.deleteLater()
+
+
+def test_settings_dialog_defers_audio_device_enumeration(monkeypatch) -> None:
+    _app = QApplication.instance() or QApplication([])
+    discovery_scheduled: list[object] = []
+    monkeypatch.setattr(
+        settings_dialog.QTimer,
+        "singleShot",
+        lambda delay, callback: discovery_scheduled.append((delay, callback)),
+    )
+    monkeypatch.setattr(
+        settings_dialog,
+        "list_dshow_audio_devices",
+        lambda: (_ for _ in ()).throw(AssertionError("enumerated during construction")),
+    )
+
+    dialog = CaptureSettingsDialog({"microphone_device": "Saved microphone"})
+
+    assert discovery_scheduled[0][0] == 0
+    assert dialog._microphone.isEnabled() is False
+    assert dialog._microphone.currentText() == "Detecting devices…"
+    dialog._populate_audio_devices(["USB microphone"])
+    assert dialog._microphone.isEnabled() is True
+    assert dialog._microphone.currentData() == "Saved microphone"
+    dialog.deleteLater()
+
+
 def test_native_wgc_buffer_copies_without_numpy() -> None:
     source = (ctypes.c_ubyte * 16)(*range(16))
     destination = bytearray(16)
@@ -110,3 +186,123 @@ def test_screenshot_publication_is_atomic_and_non_overwriting(
         pass
     else:
         raise AssertionError("Existing screenshot was overwritten")
+
+
+def test_capture_setup_failure_releases_all_started_resources(monkeypatch) -> None:
+    events: list[str] = []
+
+    class Recorder:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def start_capture(self, *_args) -> None:
+            events.append("capture-start")
+
+        def prepare_recording(self) -> str:
+            return "raw.mp4"
+
+        def start_recording(self, **_kwargs) -> None:
+            events.append("recording-start")
+
+        def stop_recording(self) -> None:
+            events.append("recording-stop")
+
+        def stop_capture(self) -> None:
+            events.append("capture-stop")
+
+    class Audio:
+        started_at = 0.0
+
+        def __init__(self, _devices) -> None:
+            pass
+
+        def start(self) -> None:
+            self.started_at = capture_main.time.perf_counter()
+            events.append("audio-start")
+
+        def stop(self) -> list:
+            events.append("audio-stop")
+            return []
+
+    class Clicks:
+        def is_button_down(self) -> bool:
+            return False
+
+        def start(self, *_args, **_kwargs) -> None:
+            events.append("click-start")
+
+        def stop(self) -> list:
+            events.append("click-stop")
+            return []
+
+    class Mouse:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def start(self, *_args, **_kwargs) -> None:
+            events.append("mouse-start")
+
+        def stop(self) -> list:
+            events.append("mouse-stop")
+            return []
+
+    class Hotkeys:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        def register_record_hotkey(self) -> None:
+            events.append("hotkey-start")
+
+        def unregister_record_hotkey(self) -> None:
+            events.append("hotkey-stop")
+
+    class Overlay:
+        def __init__(self, _rect) -> None:
+            pass
+
+        def start(self) -> None:
+            events.append("overlay-start")
+
+        def stop(self) -> None:
+            events.append("overlay-stop")
+
+    monkeypatch.setattr(capture_main, "ScreenRecorder", Recorder)
+    monkeypatch.setattr(capture_main, "AudioCapture", Audio)
+    monkeypatch.setattr(capture_main, "ClickTracker", Clicks)
+    monkeypatch.setattr(capture_main, "MouseTracker", Mouse)
+    monkeypatch.setattr(capture_main, "GlobalHotkeys", Hotkeys)
+    monkeypatch.setattr(capture_main, "RecordingOverlay", Overlay)
+    monkeypatch.setattr(capture_main.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        capture_main,
+        "_write_status_payload",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("status failed")),
+    )
+    args = argparse.Namespace(
+        fps=60,
+        monitor=1,
+        window_hwnd=0,
+        microphone="",
+        system_audio="",
+        stop_file="",
+        status_file="status.json",
+        control_file="",
+        duration=0.0,
+    )
+
+    with pytest.raises(RuntimeError, match="status failed"):
+        capture_main._record_media(
+            args,
+            "monitor",
+            {"left": 0, "top": 0, "width": 100, "height": 100},
+        )
+
+    assert events[-7:] == [
+        "recording-stop",
+        "mouse-stop",
+        "click-stop",
+        "audio-stop",
+        "hotkey-stop",
+        "overlay-stop",
+        "capture-stop",
+    ]

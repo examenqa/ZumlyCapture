@@ -60,8 +60,9 @@ def publish_screenshot(
         image.save(temp_path, format=fmt, quality=95)
         with open(temp_path, "r+b") as handle:
             os.fsync(handle.fileno())
-        os.link(temp_path, target)
-        os.remove(temp_path)
+        # The staging file lives beside the destination, so Windows can publish
+        # it atomically without requiring hard-link support from the filesystem.
+        os.rename(temp_path, target)
         temp_path = ""
         return str(target)
     finally:

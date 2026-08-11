@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import Signal
+import threading
+
+from PySide6.QtCore import QTimer, Signal
 from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -28,12 +30,15 @@ from .settings import normalize_settings
 
 class CaptureSettingsDialog(QDialog):
     settings_saved = Signal(object)
+    _audio_devices_loaded = Signal(object)
 
     def __init__(self, settings: dict, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Zumly Capture Settings")
         self.resize(560, 470)
         self._settings = normalize_settings(settings)
+        self._audio_devices_ready = False
+        self._audio_devices_loaded.connect(self._populate_audio_devices)
         root = QVBoxLayout(self)
         tabs = QTabWidget()
         tabs.addTab(self._capture_tab(), "Capture")
@@ -47,6 +52,7 @@ class CaptureSettingsDialog(QDialog):
         buttons.accepted.connect(self._save)
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
+        QTimer.singleShot(0, self._start_audio_discovery)
 
     def _folder_row(self, value: str, caption: str) -> tuple[QWidget, QLineEdit]:
         widget = QWidget()
@@ -116,18 +122,40 @@ class CaptureSettingsDialog(QDialog):
     def _audio_tab(self) -> QWidget:
         tab = QWidget()
         form = QFormLayout(tab)
-        devices = list_dshow_audio_devices()
         self._microphone = QComboBox()
         self._system_audio = QComboBox()
         for combo in (self._microphone, self._system_audio):
-            combo.addItem("None", "")
-            for device in devices:
-                combo.addItem(device, device)
-        self._select_device(self._microphone, self._settings["microphone_device"])
-        self._select_device(self._system_audio, self._settings["system_audio_device"])
+            combo.addItem("Detecting devices…", "")
+            combo.setEnabled(False)
         form.addRow("Microphone:", self._microphone)
         form.addRow("System/loopback device:", self._system_audio)
         return tab
+
+    def _start_audio_discovery(self) -> None:
+        def discover() -> None:
+            try:
+                devices = list_dshow_audio_devices()
+            except Exception:
+                devices = []
+            self._audio_devices_loaded.emit(devices)
+
+        threading.Thread(
+            target=discover,
+            daemon=True,
+            name="AudioDeviceDiscovery",
+        ).start()
+
+    def _populate_audio_devices(self, devices: object) -> None:
+        names = [str(device) for device in devices] if isinstance(devices, list) else []
+        for combo in (self._microphone, self._system_audio):
+            combo.clear()
+            combo.addItem("None", "")
+            for device in names:
+                combo.addItem(device, device)
+            combo.setEnabled(True)
+        self._select_device(self._microphone, self._settings["microphone_device"])
+        self._select_device(self._system_audio, self._settings["system_audio_device"])
+        self._audio_devices_ready = True
 
     def _smart_zoom_tab(self) -> QWidget:
         tab = QWidget()
@@ -167,6 +195,16 @@ class CaptureSettingsDialog(QDialog):
 
     def _save(self) -> None:
         value = dict(self._settings)
+        microphone = (
+            self._microphone.currentData()
+            if self._audio_devices_ready
+            else self._settings["microphone_device"]
+        )
+        system_audio = (
+            self._system_audio.currentData()
+            if self._audio_devices_ready
+            else self._settings["system_audio_device"]
+        )
         value.update(
             {
                 "output_folder": self._output_folder.text().strip(),
@@ -180,8 +218,8 @@ class CaptureSettingsDialog(QDialog):
                 "record_hotkey": self._portable_sequence(self._record_hotkey),
                 "pause_hotkey": self._portable_sequence(self._pause_hotkey),
                 "screenshot_hotkey": self._portable_sequence(self._screenshot_hotkey),
-                "microphone_device": self._microphone.currentData(),
-                "system_audio_device": self._system_audio.currentData(),
+                "microphone_device": microphone,
+                "system_audio_device": system_audio,
                 "smart_zoom_enabled": self._smart_zoom.isChecked(),
                 "smart_zoom_level": self._zoom_level.value(),
                 "render_cursor": self._render_cursor.isChecked(),

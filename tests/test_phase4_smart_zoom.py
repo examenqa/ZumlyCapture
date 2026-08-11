@@ -9,6 +9,7 @@ from zumly.app.session_timing import RecordingState
 from zumly.app.utils import ffmpeg_exe
 from zumly.main import _read_control_payload
 from zumly_capture.session import CaptureSession
+from zumly_capture import smart_zoom
 from zumly_capture.smart_zoom import (
     build_click_filter_chain,
     build_cursor_axis_expression,
@@ -103,6 +104,34 @@ def test_cancel_before_render_preserves_source_and_cleans_output(tmp_path: Path)
     )
 
     assert result.state == "cancelled"
+    assert source.read_bytes() == b"source remains recoverable"
+    assert not output.exists()
+
+
+def test_analysis_failure_preserves_source_and_returns_failed_result(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source remains recoverable")
+    output = tmp_path / "processed.mp4"
+    monkeypatch.setattr(
+        smart_zoom,
+        "analyze_activity",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("analysis failed")),
+    )
+
+    result = render_smart_zoom(
+        str(source),
+        str(output),
+        _mouse_track(),
+        [],
+        CAPTURE_RECT,
+        12_000,
+        60,
+    )
+
+    assert result.state == "failed"
+    assert result.error == "analysis failed"
     assert source.read_bytes() == b"source remains recoverable"
     assert not output.exists()
 

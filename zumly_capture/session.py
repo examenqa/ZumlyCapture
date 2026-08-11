@@ -110,9 +110,9 @@ def publish_recording(
     """Publish a non-empty MP4 and its session sidecar without overwriting media.
 
     The recording is copied to a staging file in the destination directory and
-    hard-linked into its final name. That final link is atomic and fails if the
-    destination already exists. The source temp file is removed only after the
-    final media exists.
+    renamed into its final name. On Windows this same-volume rename is atomic
+    and fails if the destination already exists. The source temp file is removed
+    only after the final media exists.
     """
     source = Path(source_path).resolve()
     output = Path(output_path).resolve()
@@ -148,13 +148,11 @@ def publish_recording(
             os.fsync(handle.fileno())
 
         manifest_stage = _stage_json(output.parent, session.to_dict())
-        os.link(media_stage, output)
-        os.remove(media_stage)
+        os.rename(media_stage, output)
         media_stage = ""
 
         try:
-            os.link(manifest_stage, manifest)
-            os.remove(manifest_stage)
+            os.rename(manifest_stage, manifest)
             manifest_stage = ""
         except OSError as exc:
             warning = f"Recording saved, but its capture manifest could not be published: {exc}"
