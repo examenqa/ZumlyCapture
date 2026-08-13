@@ -2,6 +2,8 @@ import argparse
 import json
 import ctypes
 from pathlib import Path
+import sys
+from types import SimpleNamespace
 
 import pytest
 from PIL import Image
@@ -10,7 +12,7 @@ from PySide6.QtGui import QColor, QImage
 from PySide6.QtWidgets import QApplication, QPushButton
 
 from zumly import main as capture_main
-from zumly.app import qt_tray
+from zumly.app import qt_tray, screen_recorder
 from zumly.app.qt_tray import (
     HOTKEY_PAUSE_ID,
     HOTKEY_RECORD_MONITOR_ID,
@@ -25,7 +27,7 @@ from zumly.app.qt_tray import (
     QtZumlyCaptureTray,
     _parse_hotkey,
 )
-from zumly_capture import screenshot
+from zumly_capture import screenshot, windows_shell
 from zumly_capture import settings_dialog
 from zumly_capture.audio import _active_wall_segments, parse_dshow_audio_devices
 from zumly_capture.capture_ui import physical_selection_rect
@@ -35,7 +37,12 @@ from zumly_capture.preview_dialog import (
     CapturePreviewDialog,
     render_annotations,
 )
-from zumly_capture.settings import load_settings, normalize_settings, save_settings
+from zumly_capture.settings import (
+    default_output_folder,
+    load_settings,
+    normalize_settings,
+    save_settings,
+)
 from zumly_capture.settings_dialog import CaptureSettingsDialog
 from zumly_capture.wgc import NativeFrameBuffer
 
@@ -80,6 +87,88 @@ def test_normalize_settings_migrates_phase2_general_config() -> None:
     assert settings["preview_after_capture"] is True
     assert settings["smart_zoom_enabled"] is True
     assert settings["render_cursor"] is True
+
+
+def test_default_recording_location_and_countdown_are_lightweight() -> None:
+    settings = normalize_settings({"settings_schema_version": 2})
+
+    assert Path(default_output_folder()).parts[-2:] == ("Videos", "Zumly Capture")
+    assert settings["countdown_seconds"] == 1
+
+
+def test_show_in_folder_opens_the_capture_parent(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    capture_folder = tmp_path / "Videos" / "Zumly Capture"
+    capture_folder.mkdir(parents=True)
+    capture = capture_folder / "recording.mp4"
+    capture.write_bytes(b"video")
+    opened: list[str] = []
+    monkeypatch.setattr(windows_shell.os, "startfile", opened.append)
+
+    revealed = windows_shell.reveal_in_folder(str(capture))
+
+    assert revealed == str(capture_folder.resolve())
+    assert opened == [str(capture_folder.resolve())]
+
+
+def test_capture_encoder_hint_skips_fresh_process_probe(monkeypatch) -> None:
+    screen_recorder._available_capture_encoders.cache_clear()
+    monkeypatch.setenv(
+        screen_recorder.CAPTURE_ENCODERS_ENV,
+        "h264_qsv,unknown_encoder,libx264",
+    )
+    monkeypatch.setattr(
+        screen_recorder,
+        "detect_available_encoders",
+        lambda: (_ for _ in ()).throw(AssertionError("encoder probe ran")),
+    )
+
+    available = screen_recorder._available_capture_encoders("ffmpeg.exe")
+
+    assert available == {"h264_qsv", "libx264"}
+    screen_recorder._available_capture_encoders.cache_clear()
+
+
+def test_gdi_monitor_signals_ready_before_its_capture_loop(monkeypatch) -> None:
+    recorder = screen_recorder.ScreenRecorder()
+    recorder._capturing = True
+    recorder._monitor_index = 1
+    recorder._fps = 30
+    grab_count = [0]
+    ready_after_grabs: list[int] = []
+
+    class ReadyEvent:
+        def set(self) -> None:
+            ready_after_grabs.append(grab_count[0])
+
+    class FakeCapture:
+        monitors = [{}, {"width": 8, "height": 6}]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def grab(self, _monitor):
+            grab_count[0] += 1
+            recorder._capturing = False
+            return SimpleNamespace(width=8, height=6, bgra=bytes(8 * 6 * 4))
+
+    recorder._capture_pipeline_ready_event = ReadyEvent()
+    monkeypatch.setitem(sys.modules, "mss", SimpleNamespace(mss=FakeCapture))
+    monkeypatch.setattr(
+        screen_recorder,
+        "_capture_encoder_args",
+        lambda _ffmpeg: ("libx264", []),
+    )
+    monkeypatch.setattr(screen_recorder, "_ffmpeg_exe", lambda: "ffmpeg.exe")
+
+    recorder._capture_loop_mss()
+
+    assert ready_after_grabs[0] == 0
 
 
 def test_phase5_settings_preserve_custom_number_shortcuts() -> None:
@@ -367,6 +456,7 @@ def test_screenshot_publication_is_atomic_and_non_overwriting(
 
 def test_capture_setup_failure_releases_all_started_resources(monkeypatch) -> None:
     events: list[str] = []
+    startup_sleeps: list[float] = []
 
     class Recorder:
         def __init__(self, **_kwargs) -> None:
@@ -449,7 +539,7 @@ def test_capture_setup_failure_releases_all_started_resources(monkeypatch) -> No
     monkeypatch.setattr(capture_main, "MouseTracker", Mouse)
     monkeypatch.setattr(capture_main, "GlobalHotkeys", Hotkeys)
     monkeypatch.setattr(capture_main, "RecordingOverlay", Overlay)
-    monkeypatch.setattr(capture_main.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(capture_main.time, "sleep", startup_sleeps.append)
     monkeypatch.setattr(
         capture_main,
         "_write_status_payload",
@@ -483,3 +573,4 @@ def test_capture_setup_failure_releases_all_started_resources(monkeypatch) -> No
         "overlay-stop",
         "capture-stop",
     ]
+    assert 2.0 not in startup_sleeps

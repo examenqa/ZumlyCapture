@@ -25,10 +25,12 @@ from zumly_capture.screenshot import foreground_window_handle, publish_screensho
 from zumly_capture.session import discard_unzoomed_recording
 from zumly_capture.settings import load_settings, save_settings
 from zumly_capture.settings_dialog import CaptureSettingsDialog
+from zumly_capture.windows_shell import reveal_in_folder
 
 from .icon_loader import get_brand_icon
-from .screen_recorder import ScreenRecorder
+from .screen_recorder import CAPTURE_ENCODERS_ENV, ScreenRecorder
 from .session_timing import RecordingState
+from .utils import detect_available_encoders
 from .window_utils import enumerate_windows, get_window_rect
 
 logger = logging.getLogger("zumly_capture.tray")
@@ -162,6 +164,7 @@ class QtZumlyCaptureTray(QObject):
         self._copy_capture_action: QAction | None = None
         self._reveal_capture_action: QAction | None = None
         self._cursor_zoom_action: QAction | None = None
+        self._capture_encoder_hint = ""
         self.recording_finished.connect(self._handle_recording_finished)
         self.hotkey_requested.connect(self._handle_hotkey)
         self.engine_state_changed.connect(self._handle_engine_state)
@@ -171,6 +174,11 @@ class QtZumlyCaptureTray(QObject):
         os.makedirs(self._cfg["output_folder"], exist_ok=True)
         self._initialize_tray_ui()
         self._start_hotkey_thread()
+        threading.Thread(
+            target=self._probe_capture_encoders,
+            daemon=True,
+            name="CaptureEncoderProbe",
+        ).start()
         if self._instance_guard is not None:
             self._activation_timer = QTimer(self)
             self._activation_timer.setInterval(100)
@@ -483,13 +491,17 @@ class QtZumlyCaptureTray(QObject):
             self._notify("The last capture is no longer available")
             return
         try:
-            subprocess.Popen(
-                ["explorer.exe", f"/select,{self._last_capture_path}"],
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
+            reveal_in_folder(self._last_capture_path)
         except OSError as exc:
             logger.error("Could not reveal capture: %s", exc)
             self._notify("Could not show the last capture in its folder")
+
+    def _probe_capture_encoders(self) -> None:
+        """Move FFmpeg hardware probing off the recording startup path."""
+        try:
+            self._capture_encoder_hint = ",".join(detect_available_encoders())
+        except Exception as exc:
+            logger.debug("Background capture encoder probe failed: %s", exc)
 
     def _show_capture_preview(
         self,
@@ -772,6 +784,10 @@ class QtZumlyCaptureTray(QObject):
         command += ["--control-file", self._control_file]
         command += ["--status-file", self._status_file]
 
+        process_environment = None
+        if self._capture_encoder_hint:
+            process_environment = os.environ.copy()
+            process_environment[CAPTURE_ENCODERS_ENV] = self._capture_encoder_hint
         try:
             self._process = subprocess.Popen(
                 command,
@@ -779,6 +795,7 @@ class QtZumlyCaptureTray(QObject):
                 stderr=subprocess.STDOUT,
                 text=True,
                 cwd=str(_ROOT_DIR),
+                env=process_environment,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except OSError as exc:

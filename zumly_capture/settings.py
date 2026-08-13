@@ -32,7 +32,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "screenshot_delay_seconds": 0,
     "fps": 60,
     "monitor": 1,
-    "countdown_seconds": 3,
+    "countdown_seconds": 1,
     "screenshot_monitor_hotkey": "Ctrl+Alt+1",
     "screenshot_window_hotkey": "Ctrl+Alt+2",
     "screenshot_region_hotkey": "Ctrl+Alt+3",
@@ -105,7 +105,7 @@ def normalize_settings(value: dict[str, Any] | None) -> dict[str, Any]:
     settings["fps"] = _bounded_int(settings.get("fps"), 60, 15, 120)
     settings["monitor"] = _bounded_int(settings.get("monitor"), 1, 1, 32)
     settings["countdown_seconds"] = _bounded_int(
-        settings.get("countdown_seconds"), 3, 0, 10
+        settings.get("countdown_seconds"), 1, 0, 10
     )
     for key in (
         "screenshot_monitor_hotkey",

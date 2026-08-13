@@ -46,11 +46,19 @@ from .session_timing import RecordingState, SessionTimelineClock
 
 
 WGC_BUFFER_BUDGET_BYTES = 100 * 1024 * 1024
+CAPTURE_ENCODERS_ENV = "ZUMLY_CAPTURE_ENCODERS"
 
 
 @lru_cache(maxsize=2)
 def _available_capture_encoders(ffmpeg: str) -> set[str]:
     """Return encoders verified by the shared FFmpeg capability registry."""
+    hinted = {
+        encoder.strip()
+        for encoder in os.environ.get(CAPTURE_ENCODERS_ENV, "").split(",")
+        if encoder.strip() in {"h264_nvenc", "h264_qsv", "h264_amf", "libx264"}
+    }
+    if hinted:
+        return hinted
     try:
         return set(detect_available_encoders())
     except Exception as exc:
@@ -1515,6 +1523,7 @@ class ScreenRecorder:
                 with self._lock:
                     self._target_fps = record_fps
                     self._capture_encoder = encoder_name
+                self._capture_pipeline_ready_event.set()
 
                 while self.is_capturing:
                     t0 = time.perf_counter()
@@ -1654,6 +1663,7 @@ class ScreenRecorder:
                 with self._lock:
                     self._target_fps = record_fps
                     self._capture_encoder = encoder_name
+                self._capture_pipeline_ready_event.set()
 
                 while self.is_capturing:
                     t0 = time.perf_counter()

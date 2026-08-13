@@ -6,7 +6,6 @@ from dataclasses import dataclass
 import math
 import os
 from pathlib import Path
-import subprocess
 import tempfile
 
 from PySide6.QtCore import QMimeData, QPointF, QRectF, Qt, QUrl, Signal
@@ -36,6 +35,7 @@ from PySide6.QtWidgets import (
 )
 
 from .session import discard_unzoomed_recording, restore_unzoomed_recording
+from .windows_shell import reveal_in_folder
 
 try:
     from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
@@ -582,10 +582,7 @@ class CapturePreviewDialog(QDialog):
             QApplication.clipboard().setMimeData(mime)
 
     def _reveal_capture(self) -> None:
-        subprocess.Popen(
-            ["explorer.exe", f"/select,{self.capture_path}"],
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
+        reveal_in_folder(self.capture_path)
 
     def _toggle_playback(self) -> None:
         if self._player is None:

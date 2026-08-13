@@ -187,7 +187,6 @@ def _record_media(
         else:
             recorder.start_capture(args.monitor, args.fps)
 
-        time.sleep(2.0)
         raw_video_path = recorder.prepare_recording()
         audio_started = True
         audio_capture.start()
