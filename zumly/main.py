@@ -13,7 +13,9 @@ from zumly_capture.gif_export import export_gif
 from zumly_capture.identity import FILE_PREFIX, PRODUCT_NAME
 from zumly_capture.session import (
     CaptureSession,
+    discard_recording_draft,
     discard_unzoomed_recording,
+    preserve_format_source_recording,
     preserve_unzoomed_recording,
     publish_recording,
 )
@@ -337,8 +339,12 @@ def _run(args: argparse.Namespace) -> int:
             args.result_file,
             f"{output_format.upper()} output must use the {expected_suffix} extension",
         )
-    if output_format == "gif":
-        # GIF has no audio stream. Avoid starting audio capture or muxing work.
+    format_source_path = ""
+    if output_format == "gif" and not bool(
+        getattr(args, "preserve_format_source", False)
+    ):
+        # A GIF-only capture has no audio stream. When preview format switching
+        # is enabled, retain audio in the private MP4 in case MP4 is selected.
         args.microphone = ""
         args.system_audio = ""
     target_kind = str(args.target_kind or "monitor").lower()
@@ -583,6 +589,20 @@ def _run(args: argparse.Namespace) -> int:
             )
 
         video_source = publication_source
+        if bool(getattr(args, "preserve_format_source", False)):
+            try:
+                format_source_path = preserve_format_source_recording(
+                    video_source,
+                    session_id,
+                )
+            except Exception as exc:
+                warnings.append(
+                    "The MP4 source could not be retained for changing the preview format."
+                )
+                logging.warning(
+                    "Could not preserve the GIF format source draft: %s",
+                    exc,
+                )
         gif_result = export_gif(
             video_source,
             gif_path,
@@ -592,6 +612,7 @@ def _run(args: argparse.Namespace) -> int:
         )
         if gif_result.state != "processed" or not gif_result.output_path:
             discard_unzoomed_recording(unzoomed_path)
+            discard_recording_draft(format_source_path)
             message = (
                 "GIF creation was cancelled."
                 if gif_result.state == "cancelled"
@@ -636,6 +657,7 @@ def _run(args: argparse.Namespace) -> int:
         published = publish_recording(publication_source, output_path, session)
     except Exception as exc:
         discard_unzoomed_recording(unzoomed_path)
+        discard_recording_draft(format_source_path)
         logging.exception("Could not publish the completed recording: %s", exc)
         recovery_candidate = publication_source if os.path.isfile(publication_source) else raw_video_path
         recovery_path = os.path.abspath(recovery_candidate) if os.path.isfile(recovery_candidate) else ""
@@ -649,6 +671,7 @@ def _run(args: argparse.Namespace) -> int:
         "status": "success",
         "mediaPath": published.media_path,
         "outputPath": published.media_path,
+        "outputFormat": output_format,
         "sessionId": session_id,
         "durationMs": duration_ms,
         "returnCode": 0,
@@ -664,6 +687,8 @@ def _run(args: argparse.Namespace) -> int:
         payload["warning"] = " ".join(warnings)
     if unzoomed_path and os.path.isfile(unzoomed_path):
         payload["unzoomedPath"] = unzoomed_path
+    if format_source_path and os.path.isfile(format_source_path):
+        payload["formatSourcePath"] = format_source_path
     _write_status_payload(
         args.status_file,
         last_control_sequence,
@@ -673,6 +698,7 @@ def _run(args: argparse.Namespace) -> int:
     )
     if not _write_result_payload(args.result_file, payload):
         discard_unzoomed_recording(unzoomed_path)
+        discard_recording_draft(format_source_path)
         return 1
 
     for warning in warnings:
@@ -730,6 +756,11 @@ def main() -> int:
         "--preserve-unzoomed",
         action="store_true",
         help="Retain a private unzoomed draft for the post-capture remove action",
+    )
+    parser.add_argument(
+        "--preserve-format-source",
+        action="store_true",
+        help="Retain the processed MP4 so the preview can change GIF back to MP4",
     )
     parser.add_argument(
         "--render-cursor",

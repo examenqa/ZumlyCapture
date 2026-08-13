@@ -75,32 +75,46 @@ def capture_drafts_directory() -> Path:
     return root / SETTINGS_DIRECTORY_NAME / "Drafts"
 
 
-def preserve_unzoomed_recording(
+def _preserve_recording_draft(
     source_path: str | os.PathLike[str],
     session_id: str,
+    purpose: str,
 ) -> str:
-    """Copy the unzoomed recording to a private draft for post-capture removal."""
+    """Copy a recording to a private, purpose-scoped draft."""
     source = Path(source_path).resolve()
     if not source.is_file() or source.stat().st_size <= 0:
-        raise ValueError(f"Unzoomed recording is not usable: {source}")
+        raise ValueError(f"Recording draft source is not usable: {source}")
     safe_session_id = "".join(
         character for character in str(session_id) if character.isalnum() or character in "-_"
     )
     if not safe_session_id:
-        raise ValueError("A valid session id is required to preserve an unzoomed recording")
+        raise ValueError("A valid session id is required to preserve a recording draft")
+    safe_purpose = "".join(
+        character for character in str(purpose) if character.isalnum() or character in "-_"
+    )
+    if not safe_purpose:
+        raise ValueError("A valid purpose is required to preserve a recording draft")
 
     drafts = capture_drafts_directory()
     drafts.mkdir(parents=True, exist_ok=True)
-    destination = drafts / f"{safe_session_id}.unzoomed.mp4"
+    destination = drafts / f"{safe_session_id}.{safe_purpose}.mp4"
     if destination.exists():
-        raise FileExistsError(f"Unzoomed draft already exists: {destination}")
+        raise FileExistsError(f"Recording draft already exists: {destination}")
+
+    try:
+        os.link(source, destination)
+        return str(destination)
+    except OSError:
+        # Cross-volume and non-NTFS sources cannot be linked. Fall back to a
+        # durable copy while keeping the published output independent.
+        pass
 
     staged = ""
     try:
         with tempfile.NamedTemporaryFile(
             mode="wb",
             dir=str(drafts),
-            prefix=f"{FILE_PREFIX}_unzoomed_",
+            prefix=f"{FILE_PREFIX}_{safe_purpose}_",
             suffix=".tmp",
             delete=False,
         ) as handle:
@@ -120,8 +134,24 @@ def preserve_unzoomed_recording(
                 pass
 
 
-def discard_unzoomed_recording(path: str | os.PathLike[str]) -> None:
-    """Discard one preserved unzoomed draft without touching published media."""
+def preserve_unzoomed_recording(
+    source_path: str | os.PathLike[str],
+    session_id: str,
+) -> str:
+    """Copy the unzoomed recording to a private draft for post-capture removal."""
+    return _preserve_recording_draft(source_path, session_id, "unzoomed")
+
+
+def preserve_format_source_recording(
+    source_path: str | os.PathLike[str],
+    session_id: str,
+) -> str:
+    """Retain the processed MP4 used to create a GIF for preview format changes."""
+    return _preserve_recording_draft(source_path, session_id, "format-source")
+
+
+def discard_recording_draft(path: str | os.PathLike[str]) -> None:
+    """Discard one private recording draft without touching other media."""
     if not path:
         return
     draft = Path(path)
@@ -133,6 +163,11 @@ def discard_unzoomed_recording(path: str | os.PathLike[str]) -> None:
         draft.parent.rmdir()
     except OSError:
         pass
+
+
+def discard_unzoomed_recording(path: str | os.PathLike[str]) -> None:
+    """Backward-compatible name for discarding a private recording draft."""
+    discard_recording_draft(path)
 
 
 def restore_unzoomed_recording(

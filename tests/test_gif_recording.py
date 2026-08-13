@@ -4,13 +4,14 @@ from pathlib import Path
 import subprocess
 
 from PIL import Image
+from PySide6.QtCore import QEventLoop, QTimer
 from PySide6.QtWidgets import QApplication
 
 from zumly.app import qt_tray
 from zumly.app.qt_tray import QtZumlyCaptureTray
 from zumly.app.utils import ffmpeg_exe
 from zumly_capture.gif_export import GIF_FPS, GIF_MAX_EDGE, build_gif_filter, export_gif
-from zumly_capture.preview_dialog import CapturePreviewDialog
+from zumly_capture.preview_dialog import CapturePreviewDialog, _RecordingFormatWorker
 
 
 def _animated_gif(path: Path, colors: tuple[str, str] = ("red", "blue")) -> None:
@@ -108,7 +109,90 @@ def test_gif_preview_uses_an_animation_and_can_remove_smart_zoom(tmp_path: Path)
     dialog.deleteLater()
 
 
-def test_tray_launches_gif_capture_without_audio_devices(tmp_path: Path, monkeypatch) -> None:
+def test_recording_preview_defaults_save_as_to_the_settings_choice(tmp_path: Path) -> None:
+    _app = QApplication.instance() or QApplication([])
+    video = tmp_path / "capture.mp4"
+    video.write_bytes(b"preview video")
+
+    dialog = CapturePreviewDialog(
+        str(video),
+        preferred_output_format="gif",
+    )
+
+    assert dialog._format_combo is not None
+    assert dialog._format_combo.currentData() == "gif"
+    assert [
+        dialog._format_combo.itemData(index)
+        for index in range(dialog._format_combo.count())
+    ] == ["mp4", "gif"]
+    dialog.close()
+    dialog.deleteLater()
+
+
+def test_mp4_preview_routes_gif_choice_to_the_format_worker(tmp_path: Path) -> None:
+    _app = QApplication.instance() or QApplication([])
+    video = tmp_path / "capture.mp4"
+    video.write_bytes(b"preview video")
+    dialog = CapturePreviewDialog(str(video), preferred_output_format="gif")
+    requested: list[tuple[str, str, str]] = []
+    dialog._start_format_save = (  # type: ignore[method-assign]
+        lambda source, output, output_format: requested.append(
+            (source, output, output_format)
+        )
+    )
+
+    dialog._save_video()
+
+    assert requested == [(str(video.resolve()), str(tmp_path / "capture.gif"), "gif")]
+    dialog.close()
+    dialog.deleteLater()
+
+
+def test_recording_format_worker_saves_preserved_mp4(tmp_path: Path) -> None:
+    source = tmp_path / "private-source.mp4"
+    output = tmp_path / "capture.mp4"
+    source.write_bytes(b"processed MP4 with audio")
+    outcomes: list[tuple[str, str]] = []
+    worker = _RecordingFormatWorker(str(source), str(output), "mp4")
+    worker.finished.connect(lambda path, error: outcomes.append((path, error)))
+
+    worker.run()
+
+    assert outcomes == [(str(output.resolve()), "")]
+    assert output.read_bytes() == source.read_bytes()
+    assert source.exists()
+
+
+def test_gif_preview_can_save_as_mp4_from_its_private_source(tmp_path: Path) -> None:
+    _app = QApplication.instance() or QApplication([])
+    gif = tmp_path / "capture.gif"
+    source = tmp_path / "private-format-source.mp4"
+    _animated_gif(gif)
+    source.write_bytes(b"processed MP4 with audio")
+    dialog = CapturePreviewDialog(
+        str(gif),
+        format_source_path=str(source),
+        preferred_output_format="mp4",
+    )
+    saved_paths: list[str] = []
+    loop = QEventLoop()
+    dialog.saved.connect(lambda path: (saved_paths.append(path), loop.quit()))
+
+    dialog._save_video()
+    QTimer.singleShot(5000, loop.quit)
+    loop.exec()
+
+    expected = tmp_path / "capture.mp4"
+    assert saved_paths == [str(expected.resolve())]
+    assert expected.read_bytes() == b"processed MP4 with audio"
+    assert not gif.exists()
+    assert not source.exists()
+    assert dialog._saved is True
+    dialog.close()
+    dialog.deleteLater()
+
+
+def test_tray_launches_gif_capture_with_preview_format_source(tmp_path: Path, monkeypatch) -> None:
     _app = QApplication.instance() or QApplication([])
     commands: list[list[str]] = []
 
@@ -133,6 +217,7 @@ def test_tray_launches_gif_capture_without_audio_devices(tmp_path: Path, monkeyp
         "microphone_device": "Microphone",
         "system_audio_device": "Loopback",
         "smart_zoom_enabled": False,
+        "preview_after_capture": True,
     }
     monkeypatch.setattr(qt_tray, "load_settings", lambda: dict(settings))
     monkeypatch.setattr(
@@ -150,6 +235,7 @@ def test_tray_launches_gif_capture_without_audio_devices(tmp_path: Path, monkeyp
     output = command[command.index("--out") + 1]
     assert output.endswith(".gif")
     assert command[command.index("--output-format") + 1] == "gif"
-    assert "--microphone" not in command
-    assert "--system-audio" not in command
+    assert command[command.index("--microphone") + 1] == "Microphone"
+    assert command[command.index("--system-audio") + 1] == "Loopback"
+    assert "--preserve-format-source" in command
     tray.deleteLater()

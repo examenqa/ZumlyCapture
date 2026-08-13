@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
     QColorDialog,
+    QComboBox,
     QDialog,
     QHBoxLayout,
     QLabel,
@@ -48,7 +49,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .session import discard_unzoomed_recording, restore_unzoomed_recording
+from .identity import FILE_PREFIX
+from .session import (
+    discard_recording_draft,
+    discard_unzoomed_recording,
+    restore_unzoomed_recording,
+)
 from .gif_export import export_gif
 from .windows_shell import reveal_in_folder
 
@@ -96,6 +102,82 @@ class _GifPreviewWorker(QObject):
             self.finished.emit("", "GIF preparation was cancelled.")
         else:
             self.finished.emit("", result.error or "Could not prepare the original GIF.")
+
+
+class _RecordingFormatWorker(QObject):
+    """Create the selected recording format without blocking the preview UI."""
+
+    finished = Signal(str, str)
+
+    def __init__(self, source_path: str, output_path: str, output_format: str) -> None:
+        super().__init__()
+        self._source_path = source_path
+        self._output_path = output_path
+        self._output_format = output_format
+        self._cancelled = threading.Event()
+
+    def cancel(self) -> None:
+        self._cancelled.set()
+
+    def run(self) -> None:
+        try:
+            if self._output_format == "gif":
+                result = export_gif(
+                    self._source_path,
+                    self._output_path,
+                    1.0,
+                    cancel_callback=self._cancelled.is_set,
+                )
+                if result.state == "processed":
+                    self.finished.emit(result.output_path, "")
+                elif result.state == "cancelled":
+                    self.finished.emit("", "GIF creation was cancelled.")
+                else:
+                    self.finished.emit("", result.error or "Could not create the GIF.")
+                return
+
+            source = Path(self._source_path).resolve()
+            destination = Path(self._output_path).resolve()
+            if not source.is_file() or source.stat().st_size <= 0:
+                raise ValueError(f"The MP4 source is not usable: {source}")
+            if destination.exists():
+                raise FileExistsError(f"The save destination already exists: {destination}")
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            staged = ""
+            try:
+                with tempfile.NamedTemporaryFile(
+                    mode="wb",
+                    dir=str(destination.parent),
+                    prefix=f"{FILE_PREFIX}_format_",
+                    suffix=".tmp",
+                    delete=False,
+                ) as target:
+                    staged = target.name
+                    with source.open("rb") as source_handle:
+                        while True:
+                            if self._cancelled.is_set():
+                                self.finished.emit("", "MP4 save was cancelled.")
+                                return
+                            chunk = source_handle.read(1024 * 1024)
+                            if not chunk:
+                                break
+                            target.write(chunk)
+                    target.flush()
+                    os.fsync(target.fileno())
+                if self._cancelled.is_set():
+                    self.finished.emit("", "MP4 save was cancelled.")
+                    return
+                os.rename(staged, destination)
+                staged = ""
+                self.finished.emit(str(destination), "")
+            finally:
+                if staged:
+                    try:
+                        os.remove(staged)
+                    except OSError:
+                        pass
+        except Exception as exc:
+            self.finished.emit("", str(exc))
 
 
 def _draw_annotation(painter: QPainter, annotation: Annotation) -> None:
@@ -553,11 +635,23 @@ class CapturePreviewDialog(QDialog):
         parent: QWidget | None = None,
         *,
         unzoomed_path: str = "",
+        format_source_path: str = "",
+        preferred_output_format: str = "",
     ) -> None:
         super().__init__(parent)
         self.capture_path = os.path.abspath(capture_path)
         candidate = os.path.abspath(unzoomed_path) if unzoomed_path else ""
         self._unzoomed_path = candidate if candidate and os.path.isfile(candidate) else ""
+        format_candidate = (
+            os.path.abspath(format_source_path) if format_source_path else ""
+        )
+        self._format_source_path = (
+            format_candidate
+            if format_candidate and os.path.isfile(format_candidate)
+            else ""
+        )
+        preferred = str(preferred_output_format or "").lower()
+        self._preferred_output_format = preferred if preferred in {"mp4", "gif"} else ""
         self._saved = False
         self._player = None
         self._audio = None
@@ -568,11 +662,16 @@ class CapturePreviewDialog(QDialog):
         self._gif_pending_path = ""
         self._gif_thread: QThread | None = None
         self._gif_worker: _GifPreviewWorker | None = None
+        self._format_pending_path = ""
+        self._format_old_capture = ""
+        self._format_thread: QThread | None = None
+        self._format_worker: _RecordingFormatWorker | None = None
         self._play_button: QPushButton | None = None
         self._remove_zoom: QCheckBox | None = None
         self._zoom_status: QLabel | None = None
         self._reveal_button: QPushButton | None = None
         self._save_button: QPushButton | None = None
+        self._format_combo: QComboBox | None = None
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.setWindowTitle(f"Preview · {Path(self.capture_path).name}")
         self.resize(980, 690)
@@ -588,6 +687,15 @@ class CapturePreviewDialog(QDialog):
             QToolButton:checked { background: #2f7fca; border-color: #70b7ff; }
             QPushButton:disabled { color: #718096; background: #1b2637; border-color: #2c3a4d; }
             QCheckBox { color: #d6e4f5; spacing: 8px; padding: 5px; }
+            QComboBox {
+                background: #1d2a3c; color: #f6f9ff; border: 1px solid #40536c;
+                border-radius: 7px; padding: 7px 10px; min-height: 22px;
+                min-width: 116px;
+            }
+            QComboBox:hover { border-color: #62aaf0; }
+            QComboBox QAbstractItemView {
+                background: #1d2a3c; color: #f6f9ff; selection-background-color: #356da8;
+            }
             QSlider::groove:horizontal { height: 5px; background: #33445b; border-radius: 2px; }
             QSlider::handle:horizontal { width: 14px; margin: -5px 0; background: #66aef2; border-radius: 7px; }
             """
@@ -736,6 +844,19 @@ class CapturePreviewDialog(QDialog):
         self._reveal_button.clicked.connect(self._reveal_capture)
         row.addWidget(self._reveal_button)
         row.addStretch(1)
+        if Path(self.capture_path).suffix.lower() in {".mp4", ".gif"}:
+            format_label = QLabel("Save as:")
+            format_label.setStyleSheet("color: #d6e4f5; font-weight: 650;")
+            row.addWidget(format_label)
+            self._format_combo = QComboBox()
+            self._format_combo.setObjectName("recordingFormat")
+            self._format_combo.addItem("MP4 video", "mp4")
+            self._format_combo.addItem("Animated GIF", "gif")
+            current_format = Path(self.capture_path).suffix.lower().lstrip(".")
+            selected_format = self._preferred_output_format or current_format
+            selected_index = self._format_combo.findData(selected_format)
+            self._format_combo.setCurrentIndex(max(0, selected_index))
+            row.addWidget(self._format_combo)
         close = QPushButton("Close")
         close.clicked.connect(self.close)
         row.addWidget(close)
@@ -874,16 +995,83 @@ class CapturePreviewDialog(QDialog):
         self._gif_thread = None
         self._gif_worker = None
 
-    def _save_video(self) -> None:
-        remove_zoom = self._remove_zoom is not None and self._remove_zoom.isChecked()
+    def _selected_recording_format(self) -> str:
+        if self._format_combo is None:
+            return Path(self.capture_path).suffix.lower().lstrip(".")
+        selected = str(self._format_combo.currentData() or "").lower()
+        return selected if selected in {"mp4", "gif"} else "mp4"
+
+    def _alternate_format_path(self, output_format: str) -> str:
+        source = Path(self.capture_path)
+        candidate = source.with_suffix(f".{output_format}")
+        if not candidate.exists():
+            return str(candidate)
+        for counter in range(1, 10_000):
+            candidate = source.with_name(
+                f"{source.stem}_{counter}.{output_format}"
+            )
+            if not candidate.exists():
+                return str(candidate)
+        raise FileExistsError("Could not find an unused recording filename")
+
+    def _release_recording_preview(self) -> None:
         if self._player is not None:
             self._player.stop()
             self._player.setSource(QUrl())
         if self._gif_movie is not None:
             self._gif_movie.stop()
-            # QMovie keeps its current GIF handle open on Windows. Release it
-            # before atomically replacing or deleting a previewed draft.
+            # QMovie keeps its current GIF handle open on Windows.
             self._gif_movie.setFileName("")
+
+    def _cleanup_recording_drafts(self, *excluded_paths: str) -> None:
+        excluded = {
+            os.path.abspath(path)
+            for path in excluded_paths
+            if path
+        }
+        for path in (
+            self._unzoomed_path,
+            self._format_source_path,
+            self._gif_original_path,
+            self._gif_pending_path,
+        ):
+            if path and os.path.abspath(path) not in excluded:
+                discard_recording_draft(path)
+
+    def _clear_recording_draft_paths(self) -> None:
+        self._unzoomed_path = ""
+        self._format_source_path = ""
+        self._gif_original_path = ""
+        self._gif_pending_path = ""
+
+    def _set_format_save_enabled(self, enabled: bool) -> None:
+        if self._format_combo is not None:
+            self._format_combo.setEnabled(enabled)
+        if self._remove_zoom is not None:
+            self._remove_zoom.setEnabled(enabled and bool(self._unzoomed_path))
+        if self._save_button is not None:
+            self._save_button.setEnabled(enabled)
+
+    def _save_video(self) -> None:
+        remove_zoom = self._remove_zoom is not None and self._remove_zoom.isChecked()
+        current_format = Path(self.capture_path).suffix.lower().lstrip(".")
+        selected_format = self._selected_recording_format()
+        if selected_format != current_format:
+            if selected_format == "gif":
+                source = self._unzoomed_path if remove_zoom else self.capture_path
+            else:
+                source = self._unzoomed_path if remove_zoom else self._format_source_path
+            if not source or not os.path.isfile(source):
+                raise RuntimeError(
+                    "The MP4 source for this format change is no longer available. "
+                    "Record again and keep the preview open until saving."
+                )
+            target = self._alternate_format_path(selected_format)
+            self._release_recording_preview()
+            self._start_format_save(source, target, selected_format)
+            return
+
+        self._release_recording_preview()
         restore_source = self._unzoomed_path
         if self._gif_movie is not None and remove_zoom:
             if not self._gif_original_path or not os.path.isfile(self._gif_original_path):
@@ -896,13 +1084,8 @@ class CapturePreviewDialog(QDialog):
             )
             if warning:
                 QMessageBox.warning(self, "Recording saved", warning)
-            if restore_source != self._unzoomed_path:
-                discard_unzoomed_recording(self._unzoomed_path)
-        else:
-            discard_unzoomed_recording(self._unzoomed_path)
-            discard_unzoomed_recording(self._gif_original_path)
-        self._unzoomed_path = ""
-        self._gif_original_path = ""
+        self._cleanup_recording_drafts(self.capture_path)
+        self._clear_recording_draft_paths()
         if self._remove_zoom is not None:
             self._remove_zoom.setEnabled(False)
         if self._zoom_status is not None:
@@ -916,6 +1099,102 @@ class CapturePreviewDialog(QDialog):
         if self._gif_movie is not None:
             self._set_gif_source(self.capture_path)
         self._mark_saved()
+
+    def _start_format_save(
+        self,
+        source_path: str,
+        output_path: str,
+        output_format: str,
+    ) -> None:
+        if self._format_thread is not None:
+            return
+        thread = QThread(self)
+        worker = _RecordingFormatWorker(source_path, output_path, output_format)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._recording_format_ready)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._format_thread_finished)
+        self._format_thread = thread
+        self._format_worker = worker
+        self._format_pending_path = os.path.abspath(output_path)
+        self._format_old_capture = self.capture_path
+        self._set_format_save_enabled(False)
+        if self._save_button is not None:
+            self._save_button.setText(
+                "Creating GIF…" if output_format == "gif" else "Saving MP4…"
+            )
+        if self._zoom_status is not None:
+            self._zoom_status.setText(
+                "Creating animated GIF…"
+                if output_format == "gif"
+                else "Saving MP4 video…"
+            )
+        thread.start()
+
+    def _recording_format_ready(self, path: str, error: str) -> None:
+        pending_path = self._format_pending_path
+        old_capture = self._format_old_capture
+        if not path or not os.path.isfile(path):
+            discard_recording_draft(pending_path)
+            self._format_pending_path = ""
+            self._format_old_capture = ""
+            self._set_format_save_enabled(True)
+            if self._save_button is not None:
+                self._save_button.setText("Save")
+            self._restore_recording_preview()
+            QMessageBox.critical(
+                self,
+                "Could not save recording",
+                error or "The selected recording format could not be created.",
+            )
+            return
+
+        saved_path = os.path.abspath(path)
+        cleanup_warning = ""
+        if old_capture and os.path.abspath(old_capture) != saved_path:
+            try:
+                os.remove(old_capture)
+            except OSError as exc:
+                cleanup_warning = f"The previous format could not be removed: {exc}"
+        self.capture_path = saved_path
+        self._cleanup_recording_drafts(saved_path)
+        self._clear_recording_draft_paths()
+        self._format_pending_path = ""
+        self._format_old_capture = ""
+        if self._remove_zoom is not None:
+            self._remove_zoom.setEnabled(False)
+        if self._zoom_status is not None:
+            self._zoom_status.setText(
+                f"Saved as {Path(saved_path).suffix.lstrip('.').upper()}"
+            )
+        if self._format_combo is not None:
+            index = self._format_combo.findData(
+                Path(saved_path).suffix.lower().lstrip(".")
+            )
+            if index >= 0:
+                self._format_combo.setCurrentIndex(index)
+        self._mark_saved()
+        if cleanup_warning:
+            QMessageBox.warning(self, "Recording saved", cleanup_warning)
+
+    def _restore_recording_preview(self) -> None:
+        remove_zoom = self._remove_zoom is not None and self._remove_zoom.isChecked()
+        if self._player is not None:
+            source = self._unzoomed_path if remove_zoom and self._unzoomed_path else self.capture_path
+            self._player.setSource(QUrl.fromLocalFile(source))
+        if self._gif_movie is not None:
+            source = (
+                self._gif_original_path
+                if remove_zoom and self._gif_original_path
+                else self.capture_path
+            )
+            self._set_gif_source(source)
+
+    def _format_thread_finished(self) -> None:
+        self._format_thread = None
+        self._format_worker = None
 
     def _copy_capture(self) -> None:
         if hasattr(self, "_canvas"):
@@ -969,11 +1248,17 @@ class CapturePreviewDialog(QDialog):
             if not self._gif_thread.wait(5000):
                 event.ignore()
                 return
+        if self._format_thread is not None and self._format_thread.isRunning():
+            if self._format_worker is not None:
+                self._format_worker.cancel()
+            self._format_thread.quit()
+            if not self._format_thread.wait(5000):
+                event.ignore()
+                return
         if not self._saved:
-            discard_unzoomed_recording(self._unzoomed_path)
-            discard_unzoomed_recording(self._gif_original_path)
-            discard_unzoomed_recording(self._gif_pending_path)
-            self._unzoomed_path = ""
-            self._gif_original_path = ""
-            self._gif_pending_path = ""
+            self._cleanup_recording_drafts()
+            discard_recording_draft(self._format_pending_path)
+            self._clear_recording_draft_paths()
+            self._format_pending_path = ""
+            self._format_old_capture = ""
         super().closeEvent(event)

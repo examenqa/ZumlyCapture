@@ -22,7 +22,7 @@ from zumly_capture.capture_ui import RegionSelector, WindowPickerDialog
 from zumly_capture.identity import FILE_PREFIX, PRODUCT_NAME
 from zumly_capture.preview_dialog import CapturePreviewDialog
 from zumly_capture.screenshot import foreground_window_handle, publish_screenshot
-from zumly_capture.session import discard_unzoomed_recording
+from zumly_capture.session import discard_recording_draft, discard_unzoomed_recording
 from zumly_capture.settings import load_settings, save_settings
 from zumly_capture.settings_dialog import CaptureSettingsDialog
 from zumly_capture.windows_shell import reveal_in_folder
@@ -507,19 +507,29 @@ class QtZumlyCaptureTray(QObject):
         self,
         capture_path: str,
         unzoomed_path: str = "",
+        format_source_path: str = "",
+        preferred_output_format: str = "",
     ) -> None:
         if not bool(self._cfg.get("preview_after_capture", True)):
             discard_unzoomed_recording(unzoomed_path)
+            discard_recording_draft(format_source_path)
             return
         if not capture_path or not os.path.isfile(capture_path):
             discard_unzoomed_recording(unzoomed_path)
+            discard_recording_draft(format_source_path)
             return
         if self._preview_dialog is not None:
             self._preview_dialog.close()
         try:
-            preview = CapturePreviewDialog(capture_path, unzoomed_path=unzoomed_path)
+            preview = CapturePreviewDialog(
+                capture_path,
+                unzoomed_path=unzoomed_path,
+                format_source_path=format_source_path,
+                preferred_output_format=preferred_output_format,
+            )
         except Exception as exc:
             discard_unzoomed_recording(unzoomed_path)
+            discard_recording_draft(format_source_path)
             logger.warning("Could not open capture preview: %s", exc)
             return
         self._preview_dialog = preview
@@ -737,9 +747,12 @@ class QtZumlyCaptureTray(QObject):
             ]
         microphone = str(self._cfg.get("microphone_device", "") or "")
         system_audio = str(self._cfg.get("system_audio_device", "") or "")
-        if microphone and recording_format == "mp4":
+        retain_mp4_source = recording_format == "gif" and bool(
+            self._cfg.get("preview_after_capture", True)
+        )
+        if microphone and (recording_format == "mp4" or retain_mp4_source):
             command += ["--microphone", microphone]
-        if system_audio and recording_format == "mp4":
+        if system_audio and (recording_format == "mp4" or retain_mp4_source):
             command += ["--system-audio", system_audio]
         if bool(self._cfg.get("smart_zoom_enabled", False)):
             command += [
@@ -753,6 +766,10 @@ class QtZumlyCaptureTray(QObject):
                 command.append("--render-cursor")
             if bool(self._cfg.get("render_clicks", True)):
                 command.append("--render-clicks")
+        if recording_format == "gif" and bool(
+            self._cfg.get("preview_after_capture", True)
+        ):
+            command.append("--preserve-format-source")
 
         self._stop_file = os.path.join(
             tempfile.gettempdir(),
@@ -1037,9 +1054,18 @@ class QtZumlyCaptureTray(QObject):
                 self._notify(f"Recording saved: {os.path.basename(media_path)}")
             QTimer.singleShot(
                 160,
-                lambda path=self._last_capture_path, original=str(
-                    result.get("unzoomedPath", "") or ""
-                ): self._show_capture_preview(path, original),
+                lambda path=self._last_capture_path,
+                original=str(result.get("unzoomedPath", "") or ""),
+                format_source=str(result.get("formatSourcePath", "") or ""),
+                preferred=str(
+                    result.get("outputFormat")
+                    or self._cfg.get("recording_format", "mp4")
+                ): self._show_capture_preview(
+                    path,
+                    original,
+                    format_source,
+                    preferred,
+                ),
             )
         else:
             error = str(result.get("error", "") or "Recording engine did not publish media")
