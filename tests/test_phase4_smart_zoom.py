@@ -240,7 +240,7 @@ def test_tray_toggle_becomes_processing_cancel_action() -> None:
     tray.deleteLater()
 
 
-def test_capture_manifest_records_smart_zoom_result(tmp_path: Path) -> None:
+def test_capture_session_records_smart_zoom_result(tmp_path: Path) -> None:
     media_path = tmp_path / "capture.mp4"
     session = CaptureSession(
         session_id="phase4",
@@ -252,10 +252,10 @@ def test_capture_manifest_records_smart_zoom_result(tmp_path: Path) -> None:
         smart_zoom={"state": "processed", "keyframes": [{"zoom": 1.5}]},
     )
 
-    manifest = session.to_dict()
+    capture_data = session.to_dict()
 
-    assert manifest["smartZoom"]["state"] == "processed"
-    assert manifest["smartZoom"]["keyframes"] == [{"zoom": 1.5}]
+    assert capture_data["smartZoom"]["state"] == "processed"
+    assert capture_data["smartZoom"]["keyframes"] == [{"zoom": 1.5}]
 
 
 def test_automatic_smart_zoom_can_be_removed_as_one_effect(
@@ -268,19 +268,6 @@ def test_automatic_smart_zoom_can_be_removed_as_one_effect(
     original.write_bytes(b"unzoomed recording")
     published = tmp_path / "capture.mp4"
     published.write_bytes(b"automatic smart zoom recording")
-    manifest = published.with_suffix(".zumly-capture.json")
-    manifest.write_text(
-        json.dumps(
-            {
-                "mediaPath": str(published),
-                "smartZoom": {
-                    "state": "processed",
-                    "keyframes": [{"zoom": 1.5}, {"zoom": 1.0}],
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
     draft = preserve_unzoomed_recording(original, "session-123")
 
     warning = restore_unzoomed_recording(published, draft)
@@ -288,9 +275,7 @@ def test_automatic_smart_zoom_can_be_removed_as_one_effect(
     assert warning == ""
     assert published.read_bytes() == b"unzoomed recording"
     assert not Path(draft).exists()
-    updated = json.loads(manifest.read_text(encoding="utf-8"))
-    assert updated["smartZoom"]["state"] == "removed"
-    assert updated["smartZoom"]["keyframes"] == []
+    assert not published.with_suffix(".zumly-capture.json").exists()
 
 
 def test_renderer_produces_playable_video_and_reports_progress(tmp_path: Path) -> None:

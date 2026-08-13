@@ -577,7 +577,6 @@ def _run(args: argparse.Namespace) -> int:
         "status": "success",
         "mediaPath": published.media_path,
         "outputPath": published.media_path,
-        "manifestPath": published.manifest_path,
         "sessionId": session_id,
         "durationMs": duration_ms,
         "returnCode": 0,
@@ -604,8 +603,6 @@ def _run(args: argparse.Namespace) -> int:
         discard_unzoomed_recording(unzoomed_path)
         return 1
 
-    if published.manifest_path:
-        logging.info("Capture manifest saved to %s", published.manifest_path)
     for warning in warnings:
         logging.warning(warning)
     logging.info("Force exiting to release WGC hooks...")

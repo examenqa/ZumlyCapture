@@ -48,10 +48,9 @@ editor or exporter. The tray exposes actions to open, copy, or reveal the last
 capture while retaining pause/resume support. Hardware WGC remains available
 through a NumPy-free native adapter, with a NumPy-free GDI fallback.
 
-Each successful MP4 receives a sibling `*.zumly-capture.json` manifest. The
-manifest preserves monitor geometry, timing, pause boundaries, mouse/click
-telemetry, frame cadence, capture diagnostics, and the final Smart Zoom state
-and generated keyframes.
+Each successful recording publishes only its directly playable MP4. Capture
+telemetry and Smart Zoom processing data remain internal and do not leave JSON
+sidecars in the user's output folder.
 
 Copied editor modules remain in the transitional seed tree, but they are no
 longer imported or launched by the capture worker or tray completion flow.

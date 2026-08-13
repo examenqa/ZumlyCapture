@@ -1,5 +1,5 @@
 #define MyAppName "Zumly Capture"
-#define MyAppVersion "0.4.1"
+#define MyAppVersion "0.4.2"
 #define MyAppPublisher "Zumly"
 #define MyAppExeName "ZumlyCapture.exe"
 

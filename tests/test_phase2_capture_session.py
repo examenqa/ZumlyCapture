@@ -1,12 +1,9 @@
-import json
 from pathlib import Path
 
 import pytest
 
 from zumly_capture.session import (
-    CAPTURE_SESSION_SCHEMA_VERSION,
     CaptureSession,
-    manifest_path_for,
     publish_recording,
 )
 
@@ -38,7 +35,7 @@ def _session(media_path: Path) -> CaptureSession:
     )
 
 
-def test_publish_recording_creates_playable_media_and_manifest(tmp_path: Path) -> None:
+def test_publish_recording_creates_only_playable_media(tmp_path: Path) -> None:
     source = tmp_path / "engine-temp.mp4"
     source.write_bytes(b"mock-mp4-payload")
     output = tmp_path / "capture.mp4"
@@ -48,15 +45,8 @@ def test_publish_recording_creates_playable_media_and_manifest(tmp_path: Path) -
     assert output.read_bytes() == b"mock-mp4-payload"
     assert not source.exists()
     assert result.media_path == str(output.resolve())
-    assert result.manifest_path == manifest_path_for(output)
     assert result.warning == ""
-
-    manifest = json.loads(Path(result.manifest_path).read_text(encoding="utf-8"))
-    assert manifest["schemaVersion"] == CAPTURE_SESSION_SCHEMA_VERSION
-    assert manifest["sessionId"] == "session-123"
-    assert manifest["mediaPath"] == str(output.resolve())
-    assert manifest["smartZoom"] == {"state": "not_processed", "keyframes": []}
-    assert manifest["pauseBoundaries"][0]["wallDurationMs"] == 500.0
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["capture.mp4"]
 
 
 def test_publish_recording_never_overwrites_existing_output(tmp_path: Path) -> None:

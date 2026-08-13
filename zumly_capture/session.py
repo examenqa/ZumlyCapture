@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-import json
 import os
 from pathlib import Path
 import shutil
@@ -18,7 +17,7 @@ CAPTURE_SESSION_SCHEMA_VERSION = 1
 
 @dataclass(frozen=True, slots=True)
 class CaptureSession:
-    """Metadata retained beside a directly playable recording."""
+    """In-memory metadata describing a directly playable recording."""
 
     session_id: str
     media_path: str
@@ -66,14 +65,7 @@ class CaptureSession:
 @dataclass(frozen=True, slots=True)
 class CapturePublishResult:
     media_path: str
-    manifest_path: str
     warning: str = ""
-
-
-def manifest_path_for(media_path: str | os.PathLike[str]) -> str:
-    """Return the stable sidecar name for a published recording."""
-    media = Path(media_path).resolve()
-    return str(media.with_suffix(".zumly-capture.json"))
 
 
 def capture_drafts_directory() -> Path:
@@ -147,11 +139,7 @@ def restore_unzoomed_recording(
     media_path: str | os.PathLike[str],
     draft_path: str | os.PathLike[str],
 ) -> str:
-    """Atomically replace a zoomed recording with its preserved original.
-
-    The video is restored first. Its sidecar is then updated to record that
-    automatic Smart Zoom was removed. A sidecar warning does not risk the media.
-    """
+    """Atomically replace a zoomed recording with its preserved original."""
     media = Path(media_path).resolve()
     draft = Path(draft_path).resolve()
     if not media.is_file() or media.stat().st_size <= 0:
@@ -160,7 +148,6 @@ def restore_unzoomed_recording(
         raise ValueError(f"Unzoomed draft is not usable: {draft}")
 
     staged = ""
-    warning = ""
     try:
         with tempfile.NamedTemporaryFile(
             mode="wb",
@@ -177,30 +164,8 @@ def restore_unzoomed_recording(
         os.replace(staged, media)
         staged = ""
 
-        manifest = Path(manifest_path_for(media))
-        if manifest.is_file():
-            try:
-                with manifest.open("r", encoding="utf-8") as handle:
-                    payload = json.load(handle)
-                if not isinstance(payload, dict):
-                    raise ValueError("capture manifest is not a JSON object")
-                smart_zoom = payload.get("smartZoom")
-                if not isinstance(smart_zoom, dict):
-                    smart_zoom = {}
-                smart_zoom.update({"state": "removed", "keyframes": []})
-                smart_zoom.pop("removableSourcePath", None)
-                payload["smartZoom"] = smart_zoom
-                manifest_stage = _stage_json(manifest.parent, payload)
-                try:
-                    os.replace(manifest_stage, manifest)
-                finally:
-                    if os.path.exists(manifest_stage):
-                        os.remove(manifest_stage)
-            except (OSError, ValueError, json.JSONDecodeError) as exc:
-                warning = f"Smart Zoom was removed, but metadata could not be updated: {exc}"
-
         discard_unzoomed_recording(draft)
-        return warning
+        return ""
     finally:
         if staged:
             try:
@@ -208,39 +173,12 @@ def restore_unzoomed_recording(
             except OSError:
                 pass
 
-
-def _stage_json(directory: Path, payload: dict[str, Any]) -> str:
-    temp_path = ""
-    try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=str(directory),
-            prefix=f"{FILE_PREFIX}_manifest_",
-            suffix=".tmp",
-            delete=False,
-        ) as handle:
-            temp_path = handle.name
-            json.dump(payload, handle, indent=2)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        return temp_path
-    except Exception:
-        if temp_path:
-            try:
-                os.remove(temp_path)
-            except OSError:
-                pass
-        raise
-
-
 def publish_recording(
     source_path: str | os.PathLike[str],
     output_path: str | os.PathLike[str],
     session: CaptureSession,
 ) -> CapturePublishResult:
-    """Publish a non-empty MP4 and its session sidecar without overwriting media.
+    """Publish a non-empty MP4 without overwriting existing media.
 
     The recording is copied to a staging file in the destination directory and
     renamed into its final name. On Windows this same-volume rename is atomic
@@ -249,7 +187,6 @@ def publish_recording(
     """
     source = Path(source_path).resolve()
     output = Path(output_path).resolve()
-    manifest = Path(manifest_path_for(output))
 
     if source == output:
         raise ValueError("Capture source and output paths must be different")
@@ -259,12 +196,9 @@ def publish_recording(
         raise ValueError(f"Capture engine did not produce a usable video: {source}")
     if output.exists():
         raise FileExistsError(f"Capture output already exists: {output}")
-    if manifest.exists():
-        raise FileExistsError(f"Capture manifest already exists: {manifest}")
 
     output.parent.mkdir(parents=True, exist_ok=True)
     media_stage = ""
-    manifest_stage = ""
     warning = ""
     try:
         with tempfile.NamedTemporaryFile(
@@ -280,15 +214,8 @@ def publish_recording(
             handle.flush()
             os.fsync(handle.fileno())
 
-        manifest_stage = _stage_json(output.parent, session.to_dict())
         os.rename(media_stage, output)
         media_stage = ""
-
-        try:
-            os.rename(manifest_stage, manifest)
-            manifest_stage = ""
-        except OSError as exc:
-            warning = f"Recording saved, but its capture manifest could not be published: {exc}"
 
         try:
             source.unlink()
@@ -298,13 +225,11 @@ def publish_recording(
 
         return CapturePublishResult(
             media_path=str(output),
-            manifest_path=str(manifest) if manifest.is_file() else "",
             warning=warning,
         )
     finally:
-        for staged_path in (media_stage, manifest_stage):
-            if staged_path:
-                try:
-                    os.remove(staged_path)
-                except OSError:
-                    pass
+        if media_stage:
+            try:
+                os.remove(media_stage)
+            except OSError:
+                pass
