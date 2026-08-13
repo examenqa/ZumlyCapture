@@ -9,11 +9,23 @@ from pathlib import Path
 import tempfile
 import threading
 
-from PySide6.QtCore import QMimeData, QObject, QPointF, QRectF, QSize, Qt, QThread, QUrl, Signal
+from PySide6.QtCore import (
+    QMimeData,
+    QObject,
+    QPointF,
+    QRectF,
+    QSize,
+    Qt,
+    QThread,
+    QTimer,
+    QUrl,
+    Signal,
+)
 from PySide6.QtGui import (
     QColor,
     QImage,
     QImageReader,
+    QKeySequence,
     QMouseEvent,
     QMovie,
     QPainter,
@@ -28,7 +40,6 @@ from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
     QMessageBox,
     QPushButton,
     QSlider,
@@ -116,25 +127,30 @@ def _draw_annotation(painter: QPainter, annotation: Annotation) -> None:
             return
         direction = QPointF(dx / length, dy / length)
         perpendicular = QPointF(-direction.y(), direction.x())
-        stem_half = max(2.5, annotation.width * 0.7)
-        head_length = min(length * 0.55, max(24.0, annotation.width * 5.5))
-        head_half = max(13.0, annotation.width * 2.7)
+        head_length = min(length * 0.48, max(24.0, annotation.width * 6.0))
+        head_half = max(
+            4.0,
+            min(length * 0.34, max(13.0, annotation.width * 3.0)),
+        )
+        stem_half = min(head_half * 0.46, max(2.0, annotation.width * 0.75))
         neck = annotation.end - direction * head_length
+        shoulder = neck - direction * min(
+            head_length * 0.18,
+            max(2.0, annotation.width * 0.9),
+        )
         polygon = QPolygonF(
             [
-                annotation.start - perpendicular * stem_half,
-                neck - perpendicular * stem_half,
-                neck - perpendicular * head_half,
-                annotation.end,
-                neck + perpendicular * head_half,
+                annotation.start,
                 neck + perpendicular * stem_half,
-                annotation.start + perpendicular * stem_half,
+                shoulder + perpendicular * head_half,
+                annotation.end,
+                shoulder - perpendicular * head_half,
+                neck - perpendicular * stem_half,
             ]
         )
         painter.setBrush(color)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.drawPolygon(polygon)
-        painter.drawEllipse(annotation.start, stem_half, stem_half)
     elif annotation.kind == "text":
         font = painter.font()
         font.setBold(True)
@@ -154,24 +170,111 @@ def render_annotations(image: QImage, annotations: list[Annotation]) -> QImage:
     return rendered
 
 
-class InlineTextEdit(QLineEdit):
-    """A single-line text editor positioned directly over the screenshot."""
+class InlineTextEdit(QWidget):
+    """Paint editable text and its caret directly over the screenshot."""
 
     committed = Signal(str)
     cancelled = Signal()
 
-    def __init__(self, parent: QWidget) -> None:
+    def __init__(
+        self,
+        parent: QWidget,
+        color: QColor,
+        font_pixel_size: int,
+        maximum_width: int,
+    ) -> None:
         super().__init__(parent)
         self._finished = False
-        self.setPlaceholderText("Type annotation…")
-        self.setMinimumSize(220, 38)
-        self.setMaxLength(240)
+        self._text = ""
+        self._cursor_position = 0
+        self._caret_visible = True
+        self._horizontal_offset = 0
+        self._maximum_editor_width = max(24, int(maximum_width))
+        font = self.font()
+        font.setBold(True)
+        font.setPixelSize(max(10, int(font_pixel_size)))
+        self.setFont(font)
+        self._color = QColor(color)
+        self.setAutoFillBackground(False)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled, True)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setCursor(Qt.CursorShape.IBeamCursor)
+        self._caret_timer = QTimer(self)
+        self._caret_timer.setInterval(520)
+        self._caret_timer.timeout.connect(self._toggle_caret)
+        self._caret_timer.start()
+        self._resize_to_text()
+
+    def text(self) -> str:
+        return self._text
+
+    def setText(self, text: str) -> None:
+        self._text = str(text)[:240]
+        self._cursor_position = len(self._text)
+        self._resize_to_text()
+        self.update()
+
+    def _resize_to_text(self) -> None:
+        metrics = self.fontMetrics()
+        content_width = metrics.horizontalAdvance(self._text or "M") + 6
+        self.resize(
+            min(self._maximum_editor_width, max(12, content_width)),
+            metrics.height() + 6,
+        )
+        cursor_x = metrics.horizontalAdvance(self._text[: self._cursor_position]) + 2
+        self._horizontal_offset = max(0, cursor_x - max(4, self.width() - 4))
+
+    def _toggle_caret(self) -> None:
+        self._caret_visible = not self._caret_visible
+        self.update()
+
+    def _reset_caret(self) -> None:
+        self._caret_visible = True
+        self._caret_timer.start()
+        self.update()
+
+    def _insert_text(self, text: str) -> None:
+        cleaned = " ".join(str(text).replace("\r", "\n").splitlines())
+        if not cleaned:
+            return
+        available = 240 - len(self._text)
+        inserted = cleaned[:available]
+        self._text = (
+            self._text[: self._cursor_position]
+            + inserted
+            + self._text[self._cursor_position :]
+        )
+        self._cursor_position += len(inserted)
+        self._resize_to_text()
+        self._reset_caret()
+
+    def paintEvent(self, _event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
+        painter.setFont(self.font())
+        painter.setPen(self._color)
+        metrics = painter.fontMetrics()
+        baseline = metrics.ascent()
+        painter.save()
+        painter.translate(-self._horizontal_offset, 0)
+        painter.drawText(QPointF(2, baseline), self._text)
+        if self.hasFocus() and self._caret_visible:
+            cursor_x = metrics.horizontalAdvance(self._text[: self._cursor_position]) + 2
+            painter.drawLine(
+                QPointF(cursor_x, 2),
+                QPointF(cursor_x, self.height() - 3),
+            )
+        painter.restore()
+        painter.end()
 
     def _finish(self, commit: bool) -> None:
         if self._finished:
             return
         self._finished = True
-        text = self.text().strip()
+        self._caret_timer.stop()
+        text = self._text.strip()
         if commit and text:
             self.committed.emit(text)
         else:
@@ -186,7 +289,81 @@ class InlineTextEdit(QLineEdit):
             self._finish(False)
             event.accept()
             return
+        if event.matches(QKeySequence.StandardKey.Paste):
+            self._insert_text(QApplication.clipboard().text())
+            event.accept()
+            return
+        if event.key() == Qt.Key.Key_Backspace:
+            if self._cursor_position > 0:
+                self._text = (
+                    self._text[: self._cursor_position - 1]
+                    + self._text[self._cursor_position :]
+                )
+                self._cursor_position -= 1
+                self._resize_to_text()
+                self._reset_caret()
+            event.accept()
+            return
+        if event.key() == Qt.Key.Key_Delete:
+            if self._cursor_position < len(self._text):
+                self._text = (
+                    self._text[: self._cursor_position]
+                    + self._text[self._cursor_position + 1 :]
+                )
+                self._resize_to_text()
+                self._reset_caret()
+            event.accept()
+            return
+        if event.key() == Qt.Key.Key_Left:
+            self._cursor_position = max(0, self._cursor_position - 1)
+            self._resize_to_text()
+            self._reset_caret()
+            event.accept()
+            return
+        if event.key() == Qt.Key.Key_Right:
+            self._cursor_position = min(len(self._text), self._cursor_position + 1)
+            self._resize_to_text()
+            self._reset_caret()
+            event.accept()
+            return
+        if event.key() == Qt.Key.Key_Home:
+            self._cursor_position = 0
+            self._resize_to_text()
+            self._reset_caret()
+            event.accept()
+            return
+        if event.key() == Qt.Key.Key_End:
+            self._cursor_position = len(self._text)
+            self._resize_to_text()
+            self._reset_caret()
+            event.accept()
+            return
+        typed = event.text()
+        if (typed and not typed.isspace()) or typed == " ":
+            self._insert_text(typed)
+            event.accept()
+            return
         super().keyPressEvent(event)
+
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        x = event.position().x() + self._horizontal_offset - 2
+        metrics = self.fontMetrics()
+        closest = 0
+        closest_distance = abs(x)
+        for index in range(1, len(self._text) + 1):
+            distance = abs(metrics.horizontalAdvance(self._text[:index]) - x)
+            if distance <= closest_distance:
+                closest = index
+                closest_distance = distance
+        self._cursor_position = closest
+        self._resize_to_text()
+        self._reset_caret()
+        self.setFocus(Qt.FocusReason.MouseFocusReason)
+        event.accept()
+
+    def focusInEvent(self, event) -> None:
+        self._reset_caret()
+        super().focusInEvent(event)
 
     def focusOutEvent(self, event) -> None:
         self._finish(True)
@@ -235,22 +412,23 @@ class AnnotationCanvas(QWidget):
     def _begin_inline_text(self, image_point: QPointF, widget_point: QPointF) -> None:
         if self._inline_editor is not None:
             self._inline_editor._finish(True)
-        editor = InlineTextEdit(self)
-        editor.setStyleSheet(
-            f"""
-            QLineEdit {{
-                color: {self._color.name()};
-                background: rgba(15, 23, 42, 220);
-                border: 2px solid {self._color.name()};
-                border-radius: 6px;
-                padding: 5px 8px;
-                font-size: 18px;
-                font-weight: 700;
-            }}
-            """
+        image_rect = self._image_rect()
+        scale = image_rect.width() / max(self._image.width(), 1)
+        saved_font_size = max(18, int(4.0 * 5))
+        editor = InlineTextEdit(
+            self,
+            self._color,
+            max(10, round(saved_font_size * scale)),
+            max(24, int(image_rect.right() - widget_point.x())),
         )
-        x = max(0, min(int(widget_point.x()), max(0, self.width() - editor.width())))
-        y = max(0, min(int(widget_point.y()) - 19, max(0, self.height() - 38)))
+        x = max(int(image_rect.left()), min(int(widget_point.x()), self.width() - editor.width()))
+        y = max(
+            int(image_rect.top()),
+            min(
+                int(widget_point.y()) - editor.fontMetrics().ascent(),
+                int(image_rect.bottom()) - editor.height(),
+            ),
+        )
         editor.move(x, y)
         self._inline_editor = editor
         self._inline_origin = QPointF(image_point)
@@ -299,6 +477,8 @@ class AnnotationCanvas(QWidget):
 
     def paintEvent(self, _event) -> None:
         painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
         painter.fillRect(self.rect(), QColor("#111827"))
         target = self._image_rect()
         painter.drawImage(target, self._image)

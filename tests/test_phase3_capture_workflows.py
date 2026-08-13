@@ -7,9 +7,10 @@ from types import SimpleNamespace
 
 import pytest
 from PIL import Image
-from PySide6.QtCore import QPoint, QPointF
+from PySide6.QtCore import QPoint, QPointF, Qt
 from PySide6.QtGui import QColor, QImage
-from PySide6.QtWidgets import QApplication, QPushButton
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QLineEdit, QPushButton
 
 from zumly import main as capture_main
 from zumly.app import qt_tray, screen_recorder
@@ -311,6 +312,27 @@ def test_arrow_annotation_uses_a_substantial_filled_head() -> None:
     assert rendered.pixelColor(100, 44).green() < 40
 
 
+def test_arrow_has_a_pointed_tapered_tail_and_angled_head() -> None:
+    source = QImage(190, 120, QImage.Format.Format_ARGB32)
+    source.fill(QColor("white"))
+    arrow = Annotation(
+        kind="arrow",
+        start=QPointF(20, 60),
+        end=QPointF(165, 60),
+        color=QColor("#ff0000"),
+        width=5,
+    )
+
+    rendered = render_annotations(source, [arrow])
+
+    assert rendered.pixelColor(20, 60).red() > 220
+    assert rendered.pixelColor(22, 55) == QColor("white")
+    assert rendered.pixelColor(45, 57) == QColor("white")
+    assert rendered.pixelColor(115, 57).red() > 220
+    assert rendered.pixelColor(130, 45).red() > 220
+    assert rendered.pixelColor(165, 60).red() > 220
+
+
 def test_filled_arrow_does_not_fill_later_outline_shapes() -> None:
     source = QImage(180, 120, QImage.Format.Format_ARGB32)
     source.fill(QColor("white"))
@@ -347,8 +369,16 @@ def test_text_annotation_is_entered_directly_on_the_canvas(tmp_path: Path) -> No
 
     canvas._begin_inline_text(QPointF(80, 60), QPointF(160, 130))
     assert canvas._inline_editor is not None
-    canvas._inline_editor.setText("Direct canvas text")
-    canvas._inline_editor._finish(True)
+    assert canvas._inline_editor.autoFillBackground() is False
+    assert canvas._inline_editor.testAttribute(
+        Qt.WidgetAttribute.WA_TranslucentBackground
+    )
+    assert canvas._inline_editor.styleSheet() == ""
+    assert canvas.findChildren(QLineEdit) == []
+    empty_width = canvas._inline_editor.width()
+    QTest.keyClicks(canvas._inline_editor, "Direct canvas text")
+    assert canvas._inline_editor.width() > empty_width
+    QTest.keyClick(canvas._inline_editor, Qt.Key.Key_Return)
 
     assert canvas.annotations[-1].kind == "text"
     assert canvas.annotations[-1].text == "Direct canvas text"
