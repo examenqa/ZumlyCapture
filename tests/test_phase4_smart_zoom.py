@@ -18,6 +18,7 @@ from zumly_capture import smart_zoom
 from zumly_capture.smart_zoom import (
     build_click_filter_chain,
     build_cursor_axis_expression,
+    build_cursor_command_script,
     build_zoompan_filter,
     render_smart_zoom,
 )
@@ -64,6 +65,26 @@ def test_cursor_expression_snaps_across_resume_boundary() -> None:
 
     assert "if(lt(t,1.000000),8.000,98.000)" == expression
     assert "clip((t-" not in expression
+
+
+def test_cursor_command_script_avoids_deeply_nested_expressions() -> None:
+    samples = [
+        MousePosition(
+            x=(index * 13) % 1280,
+            y=(index * 7) % 720,
+            timestamp=index * 16,
+            resume_boundary=index == 750,
+        )
+        for index in range(1500)
+    ]
+
+    script = build_cursor_command_script(samples, CAPTURE_RECT)
+
+    assert "overlay@cursor" in script
+    assert "[enter+expr]" in script
+    assert "*TI" in script
+    assert "if(" not in script
+    assert "12.000000 overlay@cursor" in script
 
 
 def test_click_filter_chain_renders_every_click() -> None:
@@ -259,8 +280,12 @@ def test_renderer_produces_playable_video_and_reports_progress(tmp_path: Path) -
     )
     rect = {"left": 0, "top": 0, "width": 320, "height": 180}
     mouse = [
-        MousePosition(x=40 + index * 10, y=90, timestamp=index * 120)
-        for index in range(12)
+        MousePosition(
+            x=20 + (index * 7) % 280,
+            y=20 + (index * 3) % 140,
+            timestamp=index * 16,
+        )
+        for index in range(1500)
     ]
     progress: list[int] = []
 

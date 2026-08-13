@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field
 import os
 import subprocess
@@ -162,6 +163,75 @@ def build_cursor_axis_expression(
     return expression
 
 
+def build_cursor_command_script(
+    mouse_track: Iterable[MousePosition],
+    capture_rect: dict,
+    target: str = "overlay@cursor",
+) -> str:
+    """Build bounded FFmpeg commands for smooth cursor motion.
+
+    A single deeply nested overlay expression exceeds FFmpeg's expression
+    parser on ordinary 20–30 second recordings. ``sendcmd`` keeps each motion
+    segment independent while retaining frame-by-frame interpolation.
+    """
+    samples = downsample_cursor_track(mouse_track)
+    if not samples:
+        return ""
+
+    left = float(capture_rect.get("left", 0))
+    top = float(capture_rect.get("top", 0))
+    width = max(float(capture_rect.get("width", 1)), 1.0)
+    height = max(float(capture_rect.get("height", 1)), 1.0)
+
+    def coordinates(sample: MousePosition) -> tuple[float, float]:
+        x = max(0.0, min(width - 24.0, float(sample.x) - left - 2.0))
+        y = max(0.0, min(height - 32.0, float(sample.y) - top - 2.0))
+        return x, y
+
+    commands: list[str] = []
+    first_x, first_y = coordinates(samples[0])
+    first_time = max(0.0, float(samples[0].timestamp) / 1000.0)
+    commands.append(
+        f"{first_time:.6f} {target} x {first_x:.3f}, {target} y {first_y:.3f};"
+    )
+
+    for current, following in zip(samples, samples[1:]):
+        start = max(0.0, float(current.timestamp) / 1000.0)
+        end = max(start, float(following.timestamp) / 1000.0)
+        current_x, current_y = coordinates(current)
+        following_x, following_y = coordinates(following)
+        if following.resume_boundary or end - start <= 0.000001:
+            commands.append(
+                f"{end:.6f} {target} x {following_x:.3f}, "
+                f"{target} y {following_y:.3f};"
+            )
+            continue
+        commands.append(
+            f"{start:.6f}-{end:.6f} "
+            f"[enter+expr] {target} x "
+            f"'{current_x:.3f}+({following_x:.3f}-{current_x:.3f})*TI', "
+            f"[enter+expr] {target} y "
+            f"'{current_y:.3f}+({following_y:.3f}-{current_y:.3f})*TI';"
+        )
+
+    last_x, last_y = coordinates(samples[-1])
+    last_time = max(0.0, float(samples[-1].timestamp) / 1000.0)
+    commands.append(
+        f"{last_time:.6f} {target} x {last_x:.3f}, {target} y {last_y:.3f};"
+    )
+    return "\n".join(commands)
+
+
+def _escape_filter_path(path: str) -> str:
+    """Escape an absolute Windows path for an FFmpeg filter option."""
+    return (
+        os.path.abspath(path)
+        .replace("\\", "/")
+        .replace(":", r"\:")
+        .replace("'", r"\'")
+    )
+
+
 def build_click_filter_chain(
     input_label: str,
     click_events: Iterable[ClickEvent],
@@ -204,6 +274,7 @@ def _build_filter_graph(
     fps: float,
     render_cursor: bool,
     render_clicks: bool,
+    cursor_command_path: str = "",
 ) -> str:
     filters = ["[0:v]setpts=PTS-STARTPTS,format=rgba[base]"]
     current = "base"
@@ -212,10 +283,12 @@ def _build_filter_graph(
         if click_chain:
             filters.append(click_chain)
     if render_cursor and mouse_track:
-        x = build_cursor_axis_expression(mouse_track, "x", capture_rect, 24)
-        y = build_cursor_axis_expression(mouse_track, "y", capture_rect, 32)
+        if not cursor_command_path:
+            raise ValueError("Cursor rendering requires a command script")
+        command_path = _escape_filter_path(cursor_command_path)
+        filters.append(f"[{current}]sendcmd=f='{command_path}'[commanded]")
         filters.append(
-            f"[{current}][1:v]overlay=x='{x}':y='{y}':"
+            "[commanded][1:v]overlay@cursor=x=0:y=0:"
             "eval=frame:eof_action=repeat:shortest=1[decorated]"
         )
         current = "decorated"
@@ -257,9 +330,11 @@ def render_smart_zoom(
     """Analyze every click and render Smart Zoom without risking source media."""
     keyframes: list[ZoomKeyframe] = []
     cursor_path = ""
+    cursor_command_path = ""
     filter_path = ""
     process: subprocess.Popen[str] | None = None
     last_progress = -1
+    diagnostic_lines: deque[str] = deque(maxlen=16)
     try:
         keyframes = analyze_activity(
             mouse_track,
@@ -281,6 +356,15 @@ def render_smart_zoom(
             with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as handle:
                 cursor_path = handle.name
             _create_cursor_image(cursor_path)
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                suffix=".commands",
+                delete=False,
+            ) as handle:
+                cursor_command_path = handle.name
+                handle.write(build_cursor_command_script(mouse_track, capture_rect))
+                handle.write("\n")
             command += ["-loop", "1", "-framerate", str(max(float(fps), 1.0)), "-i", cursor_path]
         graph = _build_filter_graph(
             keyframes,
@@ -290,6 +374,7 @@ def render_smart_zoom(
             fps,
             render_cursor,
             render_clicks,
+            cursor_command_path,
         )
         with open(filter_path, "w", encoding="utf-8") as handle:
             handle.write(graph)
@@ -333,6 +418,24 @@ def render_smart_zoom(
                 return SmartZoomResult(state="cancelled", keyframes=keyframes)
             name, separator, value = raw_line.strip().partition("=")
             if not separator or name not in {"out_time_us", "out_time_ms"}:
+                stripped = raw_line.strip()
+                if stripped and name not in {
+                    "bitrate",
+                    "drop_frames",
+                    "dup_frames",
+                    "fps",
+                    "frame",
+                    "out_time",
+                    "progress",
+                    "speed",
+                    "stream_0_0_q",
+                    "total_size",
+                }:
+                    if len(stripped) > 900:
+                        stripped = (
+                            f"{stripped[:420]}...<truncated>...{stripped[-420:]}"
+                        )
+                    diagnostic_lines.append(stripped)
                 continue
             try:
                 # Modern FFmpeg emits both values in microseconds despite the
@@ -348,10 +451,15 @@ def render_smart_zoom(
         return_code = process.wait()
         if return_code != 0 or not os.path.isfile(output_path) or os.path.getsize(output_path) <= 0:
             _remove_file(output_path)
+            signed_code = return_code if return_code < 2**31 else return_code - 2**32
+            details = " | ".join(diagnostic_lines)[-4000:]
+            message = f"FFmpeg exited with code {signed_code}"
+            if details:
+                message = f"{message}: {details}"
             return SmartZoomResult(
                 state="failed",
                 keyframes=keyframes,
-                error=f"FFmpeg exited with code {return_code}",
+                error=message,
             )
         if progress_callback is not None:
             progress_callback(100)
@@ -367,4 +475,5 @@ def render_smart_zoom(
         return SmartZoomResult(state="failed", keyframes=keyframes, error=str(exc))
     finally:
         _remove_file(cursor_path)
+        _remove_file(cursor_command_path)
         _remove_file(filter_path)
