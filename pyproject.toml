@@ -65,7 +65,7 @@ namespaces = true
 "zumly.app" = [
     "branding/*.svg",
     "branding/generated/*",
-    "cursors/*.svg",
+    "cursors/*",
     "fonts/*",
     "icons/*.svg",
     "transition_materials/*.png",

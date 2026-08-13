@@ -7,7 +7,7 @@ brand_icon = "zumly/app/branding/generated/zumly.ico"
 app_datas = [
     ("zumly/app/branding/*.svg", "zumly/app/branding"),
     ("zumly/app/branding/generated/*", "zumly/app/branding/generated"),
-    ("zumly/app/cursors/*.svg", "zumly/app/cursors"),
+    ("zumly/app/cursors/*", "zumly/app/cursors"),
     ("zumly/app/fonts/*", "zumly/app/fonts"),
     ("zumly/app/icons/*.svg", "zumly/app/icons"),
 ]

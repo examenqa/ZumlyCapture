@@ -2,6 +2,8 @@ from pathlib import Path
 import json
 import subprocess
 
+from PIL import Image
+
 from zumly.app.activity_analyzer import analyze_activity
 from zumly.app.models import ClickEvent, MousePosition, ZoomKeyframe
 from zumly.app.qt_tray import QtZumlyCaptureTray
@@ -92,8 +94,48 @@ def test_click_filter_chain_renders_every_click() -> None:
 
     chain, output = build_click_filter_chain("base", clicks, CAPTURE_RECT)
 
-    assert chain.count("drawbox=") == len(clicks)
+    assert chain.count("overlay=x=") == len(clicks)
+    assert chain.count("setpts=PTS-STARTPTS+") == len(clicks)
+    assert "split=9" in chain
+    assert "drawbox=" not in chain
     assert output == "click8"
+
+
+def test_recording_cursor_uses_transparent_cyan_asset(tmp_path: Path) -> None:
+    cursor = tmp_path / "cursor.png"
+
+    smart_zoom._create_cursor_image(str(cursor))
+
+    with Image.open(cursor) as image:
+        rgba = image.convert("RGBA")
+        assert rgba.size == (smart_zoom.CURSOR_WIDTH, smart_zoom.CURSOR_HEIGHT)
+        assert rgba.getpixel((0, 0))[3] == 0
+        visible = [
+            rgba.getpixel((x, y))
+            for y in range(rgba.height)
+            for x in range(rgba.width)
+            if rgba.getpixel((x, y))[3] > 200
+        ]
+        assert visible
+        assert max(pixel[2] for pixel in visible) > 180
+        assert max(pixel[1] for pixel in visible) > 140
+
+
+def test_click_ripple_is_an_animated_transparent_circle(tmp_path: Path) -> None:
+    ripple = tmp_path / "ripple.png"
+
+    smart_zoom._create_click_ripple(str(ripple), 30)
+
+    with Image.open(ripple) as image:
+        assert image.size == (
+            smart_zoom.CLICK_RIPPLE_SIZE,
+            smart_zoom.CLICK_RIPPLE_SIZE,
+        )
+        assert image.n_frames >= 12
+        image.seek(image.n_frames // 2)
+        rgba = image.convert("RGBA")
+        assert rgba.getpixel((0, 0))[3] == 0
+        assert rgba.getchannel("A").getextrema()[1] > 0
 
 
 def test_zoompan_filter_is_linear_and_preserves_dimensions() -> None:
@@ -293,7 +335,11 @@ def test_renderer_produces_playable_video_and_reports_progress(tmp_path: Path) -
         str(source),
         str(output),
         mouse,
-        [ClickEvent(x=180, y=90, timestamp=500)],
+        [
+            ClickEvent(x=120, y=60, timestamp=300),
+            ClickEvent(x=180, y=90, timestamp=700),
+            ClickEvent(x=260, y=120, timestamp=1100),
+        ],
         rect,
         1500,
         30,
