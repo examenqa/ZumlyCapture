@@ -267,6 +267,7 @@ def render_smart_zoom(
             click_events=click_events,
             max_clusters=None,
             zoom_level=float(zoom_level),
+            follow_cursor=True,
         )
         if not keyframes:
             return SmartZoomResult(state="no_activity")

@@ -24,6 +24,7 @@ def default_screenshot_folder() -> str:
 
 
 DEFAULT_SETTINGS: dict[str, Any] = {
+    "settings_schema_version": 2,
     "output_folder": default_output_folder(),
     "screenshot_folder": default_screenshot_folder(),
     "screenshot_format": "png",
@@ -32,14 +33,20 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     "fps": 60,
     "monitor": 1,
     "countdown_seconds": 3,
-    "record_hotkey": "Ctrl+Shift+R",
-    "pause_hotkey": "Ctrl+Shift+P",
-    "screenshot_hotkey": "Ctrl+Shift+S",
+    "screenshot_monitor_hotkey": "Ctrl+Alt+1",
+    "screenshot_window_hotkey": "Ctrl+Alt+2",
+    "screenshot_region_hotkey": "Ctrl+Alt+3",
+    "record_monitor_hotkey": "Ctrl+Alt+4",
+    "record_window_hotkey": "Ctrl+Alt+5",
+    "record_region_hotkey": "Ctrl+Alt+6",
+    "pause_hotkey": "Ctrl+Alt+9",
+    "stop_hotkey": "Ctrl+Alt+0",
+    "preview_after_capture": True,
     "microphone_device": "",
     "system_audio_device": "",
-    "smart_zoom_enabled": False,
+    "smart_zoom_enabled": True,
     "smart_zoom_level": 1.5,
-    "render_cursor": False,
+    "render_cursor": True,
     "render_clicks": True,
 }
 
@@ -62,6 +69,29 @@ def normalize_settings(value: dict[str, Any] | None) -> dict[str, Any]:
     source = value if isinstance(value, dict) else {}
     settings = dict(DEFAULT_SETTINGS)
     settings.update(source)
+    try:
+        source_version = int(source.get("settings_schema_version", 1))
+    except (TypeError, ValueError):
+        source_version = 1
+    if source_version < 2:
+        # Phase 5 replaces the original three Ctrl+Shift shortcuts with a
+        # complete, memorable Ctrl+Alt+number command map. It also turns on
+        # the post-capture experience users expect from a capture utility.
+        for key in (
+            "screenshot_monitor_hotkey",
+            "screenshot_window_hotkey",
+            "screenshot_region_hotkey",
+            "record_monitor_hotkey",
+            "record_window_hotkey",
+            "record_region_hotkey",
+            "pause_hotkey",
+            "stop_hotkey",
+        ):
+            settings[key] = DEFAULT_SETTINGS[key]
+        settings["preview_after_capture"] = True
+        settings["smart_zoom_enabled"] = True
+        settings["render_cursor"] = True
+    settings["settings_schema_version"] = 2
     settings["output_folder"] = str(settings.get("output_folder") or default_output_folder())
     settings["screenshot_folder"] = str(
         settings.get("screenshot_folder") or default_screenshot_folder()
@@ -77,12 +107,21 @@ def normalize_settings(value: dict[str, Any] | None) -> dict[str, Any]:
     settings["countdown_seconds"] = _bounded_int(
         settings.get("countdown_seconds"), 3, 0, 10
     )
-    for key, fallback in (
-        ("record_hotkey", "Ctrl+Shift+R"),
-        ("pause_hotkey", "Ctrl+Shift+P"),
-        ("screenshot_hotkey", "Ctrl+Shift+S"),
+    for key in (
+        "screenshot_monitor_hotkey",
+        "screenshot_window_hotkey",
+        "screenshot_region_hotkey",
+        "record_monitor_hotkey",
+        "record_window_hotkey",
+        "record_region_hotkey",
+        "pause_hotkey",
+        "stop_hotkey",
     ):
+        fallback = str(DEFAULT_SETTINGS[key])
         settings[key] = str(settings.get(key) or fallback)
+    settings["preview_after_capture"] = bool(
+        settings.get("preview_after_capture", True)
+    )
     settings["microphone_device"] = str(settings.get("microphone_device") or "")
     settings["system_audio_device"] = str(settings.get("system_audio_device") or "")
     settings["smart_zoom_enabled"] = bool(settings.get("smart_zoom_enabled", False))

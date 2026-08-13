@@ -35,7 +35,7 @@ class CaptureSettingsDialog(QDialog):
     def __init__(self, settings: dict, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Zumly Capture Settings")
-        self.resize(560, 470)
+        self.resize(620, 560)
         self._settings = normalize_settings(settings)
         self._audio_devices_ready = False
         self._audio_devices_loaded.connect(self._populate_audio_devices)
@@ -86,6 +86,11 @@ class CaptureSettingsDialog(QDialog):
         self._copy_screenshot = QCheckBox("Copy screenshots to clipboard")
         self._copy_screenshot.setChecked(self._settings["copy_screenshot"])
         form.addRow("", self._copy_screenshot)
+        self._preview_after_capture = QCheckBox(
+            "Show preview after screenshots and recordings"
+        )
+        self._preview_after_capture.setChecked(self._settings["preview_after_capture"])
+        form.addRow("", self._preview_after_capture)
         self._screenshot_delay = QSpinBox()
         self._screenshot_delay.setRange(0, 10)
         self._screenshot_delay.setSuffix(" seconds")
@@ -109,14 +114,22 @@ class CaptureSettingsDialog(QDialog):
     def _shortcuts_tab(self) -> QWidget:
         tab = QWidget()
         form = QFormLayout(tab)
-        self._record_hotkey = QKeySequenceEdit(QKeySequence(self._settings["record_hotkey"]))
-        self._pause_hotkey = QKeySequenceEdit(QKeySequence(self._settings["pause_hotkey"]))
-        self._screenshot_hotkey = QKeySequenceEdit(
-            QKeySequence(self._settings["screenshot_hotkey"])
+        self._shortcut_edits: dict[str, QKeySequenceEdit] = {}
+        shortcut_rows = (
+            ("screenshot_monitor_hotkey", "Screenshot monitor:"),
+            ("screenshot_window_hotkey", "Screenshot active window:"),
+            ("screenshot_region_hotkey", "Screenshot selected region:"),
+            ("record_monitor_hotkey", "Record monitor:"),
+            ("record_window_hotkey", "Record selected window:"),
+            ("record_region_hotkey", "Record selected region:"),
+            ("pause_hotkey", "Pause/resume recording:"),
+            ("stop_hotkey", "Stop recording:"),
         )
-        form.addRow("Start/stop recording:", self._record_hotkey)
-        form.addRow("Pause/resume:", self._pause_hotkey)
-        form.addRow("Capture monitor screenshot:", self._screenshot_hotkey)
+        for key, label in shortcut_rows:
+            edit = QKeySequenceEdit(QKeySequence(self._settings[key]))
+            edit.setMaximumSequenceLength(1)
+            self._shortcut_edits[key] = edit
+            form.addRow(label, edit)
         return tab
 
     def _audio_tab(self) -> QWidget:
@@ -160,7 +173,7 @@ class CaptureSettingsDialog(QDialog):
     def _smart_zoom_tab(self) -> QWidget:
         tab = QWidget()
         form = QFormLayout(tab)
-        self._smart_zoom = QCheckBox("Apply Smart Zoom after recording")
+        self._smart_zoom = QCheckBox("Enable cursor-follow zoom after recording")
         self._smart_zoom.setChecked(self._settings["smart_zoom_enabled"])
         form.addRow("", self._smart_zoom)
         self._zoom_level = QDoubleSpinBox()
@@ -168,7 +181,7 @@ class CaptureSettingsDialog(QDialog):
         self._zoom_level.setSingleStep(0.1)
         self._zoom_level.setValue(self._settings["smart_zoom_level"])
         form.addRow("Zoom level:", self._zoom_level)
-        self._render_cursor = QCheckBox("Render captured cursor telemetry")
+        self._render_cursor = QCheckBox("Keep the cursor visible in the zoomed video")
         self._render_cursor.setChecked(self._settings["render_cursor"])
         form.addRow("", self._render_cursor)
         self._render_clicks = QCheckBox("Render click indicators")
@@ -211,19 +224,23 @@ class CaptureSettingsDialog(QDialog):
                 "screenshot_folder": self._screenshot_folder.text().strip(),
                 "screenshot_format": self._format.currentData(),
                 "copy_screenshot": self._copy_screenshot.isChecked(),
+                "preview_after_capture": self._preview_after_capture.isChecked(),
                 "screenshot_delay_seconds": self._screenshot_delay.value(),
                 "fps": self._fps.value(),
                 "monitor": self._monitor.value(),
                 "countdown_seconds": self._countdown.value(),
-                "record_hotkey": self._portable_sequence(self._record_hotkey),
-                "pause_hotkey": self._portable_sequence(self._pause_hotkey),
-                "screenshot_hotkey": self._portable_sequence(self._screenshot_hotkey),
                 "microphone_device": microphone,
                 "system_audio_device": system_audio,
                 "smart_zoom_enabled": self._smart_zoom.isChecked(),
                 "smart_zoom_level": self._zoom_level.value(),
                 "render_cursor": self._render_cursor.isChecked(),
                 "render_clicks": self._render_clicks.isChecked(),
+            }
+        )
+        value.update(
+            {
+                key: self._portable_sequence(edit)
+                for key, edit in self._shortcut_edits.items()
             }
         )
         value = normalize_settings(value)

@@ -6,15 +6,30 @@ from pathlib import Path
 import pytest
 from PIL import Image
 from PySide6.QtCore import QPoint
+from PySide6.QtGui import QColor, QImage
 from PySide6.QtWidgets import QApplication
 
 from zumly import main as capture_main
 from zumly.app import qt_tray
-from zumly.app.qt_tray import MOD_CONTROL, MOD_SHIFT, QtZumlyCaptureTray, _parse_hotkey
+from zumly.app.qt_tray import (
+    HOTKEY_PAUSE_ID,
+    HOTKEY_RECORD_MONITOR_ID,
+    HOTKEY_RECORD_REGION_ID,
+    HOTKEY_RECORD_WINDOW_ID,
+    HOTKEY_SCREENSHOT_MONITOR_ID,
+    HOTKEY_SCREENSHOT_REGION_ID,
+    HOTKEY_SCREENSHOT_WINDOW_ID,
+    HOTKEY_STOP_ID,
+    MOD_CONTROL,
+    MOD_SHIFT,
+    QtZumlyCaptureTray,
+    _parse_hotkey,
+)
 from zumly_capture import screenshot
 from zumly_capture import settings_dialog
 from zumly_capture.audio import _active_wall_segments, parse_dshow_audio_devices
 from zumly_capture.capture_ui import physical_selection_rect
+from zumly_capture.preview_dialog import Annotation, render_annotations
 from zumly_capture.settings import load_settings, normalize_settings, save_settings
 from zumly_capture.settings_dialog import CaptureSettingsDialog
 from zumly_capture.wgc import NativeFrameBuffer
@@ -28,7 +43,8 @@ def test_settings_normalize_and_roundtrip(tmp_path: Path) -> None:
             "monitor": 2,
             "countdown_seconds": -2,
             "screenshot_format": "JPEG",
-            "record_hotkey": "Alt+F9",
+            "record_monitor_hotkey": "Alt+F9",
+            "settings_schema_version": 2,
             "smart_zoom_level": 9,
         },
         path,
@@ -48,7 +64,29 @@ def test_normalize_settings_migrates_phase2_general_config() -> None:
     assert settings["output_folder"] == "D:/Captures"
     assert settings["fps"] == 30
     assert settings["monitor"] == 3
-    assert settings["screenshot_hotkey"] == "Ctrl+Shift+S"
+    assert settings["screenshot_monitor_hotkey"] == "Ctrl+Alt+1"
+    assert settings["screenshot_window_hotkey"] == "Ctrl+Alt+2"
+    assert settings["screenshot_region_hotkey"] == "Ctrl+Alt+3"
+    assert settings["record_monitor_hotkey"] == "Ctrl+Alt+4"
+    assert settings["record_window_hotkey"] == "Ctrl+Alt+5"
+    assert settings["record_region_hotkey"] == "Ctrl+Alt+6"
+    assert settings["pause_hotkey"] == "Ctrl+Alt+9"
+    assert settings["stop_hotkey"] == "Ctrl+Alt+0"
+    assert settings["preview_after_capture"] is True
+    assert settings["smart_zoom_enabled"] is True
+    assert settings["render_cursor"] is True
+
+
+def test_phase5_settings_preserve_custom_number_shortcuts() -> None:
+    settings = normalize_settings(
+        {
+            "settings_schema_version": 2,
+            "screenshot_monitor_hotkey": "Alt+F1",
+            "smart_zoom_enabled": False,
+        }
+    )
+
+    assert settings["screenshot_monitor_hotkey"] == "Alt+F1"
     assert settings["smart_zoom_enabled"] is False
 
 
@@ -86,6 +124,45 @@ def test_audio_segments_remove_pause_wall_time() -> None:
 def test_hotkey_parser_supports_letters_and_function_keys() -> None:
     assert _parse_hotkey("Ctrl+Shift+R") == (MOD_CONTROL | MOD_SHIFT, ord("R"))
     assert _parse_hotkey("Alt+F9") == (0x0001, 0x78)
+    assert _parse_hotkey("Ctrl+Alt+1") == (MOD_CONTROL | 0x0001, ord("1"))
+
+
+def test_number_hotkeys_route_to_all_capture_actions() -> None:
+    calls: list[str] = []
+
+    class TrayActions:
+        _screenshot_monitor = lambda self: calls.append("screenshot-monitor")
+        _screenshot_active_window = lambda self: calls.append("screenshot-window")
+        _screenshot_region = lambda self: calls.append("screenshot-region")
+        _record_monitor = lambda self: calls.append("record-monitor")
+        _record_window = lambda self: calls.append("record-window")
+        _record_region = lambda self: calls.append("record-region")
+        _on_pause_toggle = lambda self: calls.append("pause")
+        _on_stop_hotkey = lambda self: calls.append("stop")
+
+    tray = TrayActions()
+    for hotkey_id in (
+        HOTKEY_SCREENSHOT_MONITOR_ID,
+        HOTKEY_SCREENSHOT_WINDOW_ID,
+        HOTKEY_SCREENSHOT_REGION_ID,
+        HOTKEY_RECORD_MONITOR_ID,
+        HOTKEY_RECORD_WINDOW_ID,
+        HOTKEY_RECORD_REGION_ID,
+        HOTKEY_PAUSE_ID,
+        HOTKEY_STOP_ID,
+    ):
+        QtZumlyCaptureTray._handle_hotkey(tray, hotkey_id)
+
+    assert calls == [
+        "screenshot-monitor",
+        "screenshot-window",
+        "screenshot-region",
+        "record-monitor",
+        "record-window",
+        "record-region",
+        "pause",
+        "stop",
+    ]
 
 
 def test_region_selection_uses_physical_desktop_coordinates() -> None:
@@ -95,6 +172,23 @@ def test_region_selection_uses_physical_desktop_coordinates() -> None:
         "width": 1200,
         "height": 900,
     }
+
+
+def test_annotation_renderer_composites_without_mutating_source() -> None:
+    source = QImage(120, 80, QImage.Format.Format_ARGB32)
+    source.fill(QColor("white"))
+    annotation = Annotation(
+        kind="rectangle",
+        start=QPoint(10, 10),
+        end=QPoint(100, 60),
+        color=QColor("#ff0000"),
+        width=5,
+    )
+
+    rendered = render_annotations(source, [annotation])
+
+    assert source.pixelColor(10, 10) == QColor("white")
+    assert rendered.pixelColor(10, 10) != QColor("white")
 
 
 def test_active_window_is_resolved_after_tray_menu_closes(monkeypatch) -> None:

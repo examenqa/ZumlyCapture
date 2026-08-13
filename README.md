@@ -10,8 +10,9 @@ capture components are moved behind the standalone `zumly_capture` package.
 
 ## Current status
 
-Phases 1 through 4 establish an independent repository, the complete capture
-surface, and optional Smart Zoom post-processing. The tray can take monitor,
+Phases 1 through 5 establish an independent repository, the complete capture
+surface, post-capture preview and annotation, and Smart Zoom post-processing.
+The tray can take monitor,
 active-window, and selected-region
 screenshots; record monitors, windows, and regions; run delayed screenshots and
 recording countdowns; and use configurable global shortcuts. Optional
@@ -25,6 +26,19 @@ click-indicator layers. The tray reports render progress and exposes a Cancel
 Smart Zoom action. Cancellation or an FFmpeg failure falls back to publishing
 the complete unprocessed recording, so post-processing cannot discard a
 successful capture.
+
+Every successful screenshot or recording opens in a compact preview. Image
+previews include pen, highlighter, arrow, rectangle, text, color, undo, copy,
+and in-place save controls; video previews include playback, copy, open, and
+show-in-folder actions. Cursor-follow zoom is enabled by default and is also
+available as a quick toggle in the tray menu.
+
+Default global shortcuts use the `Ctrl+Alt+number` family:
+
+- `Ctrl+Alt+1`, `2`, `3`: monitor, active-window, and region screenshots.
+- `Ctrl+Alt+4`, `5`, `6`: monitor, window, and region recordings.
+- `Ctrl+Alt+9`: pause or resume recording.
+- `Ctrl+Alt+0`: stop recording or cancel post-processing.
 
 The recording worker publishes a playable MP4 without launching the Zumly
 editor or exporter. The tray exposes actions to open, copy, or reveal the last
