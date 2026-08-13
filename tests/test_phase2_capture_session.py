@@ -67,7 +67,7 @@ def test_publish_recording_rejects_empty_engine_output(tmp_path: Path) -> None:
     source.touch()
     output = tmp_path / "capture.mp4"
 
-    with pytest.raises(ValueError, match="usable video"):
+    with pytest.raises(ValueError, match="usable recording"):
         publish_recording(source, output, _session(output))
 
     assert not output.exists()

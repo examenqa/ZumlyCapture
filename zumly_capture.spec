@@ -21,6 +21,7 @@ analysis = Analysis(
         "zumly_capture",
         "zumly_capture.audio",
         "zumly_capture.capture_ui",
+        "zumly_capture.gif_export",
         "zumly_capture.session",
         "zumly_capture.settings",
         "zumly_capture.settings_dialog",

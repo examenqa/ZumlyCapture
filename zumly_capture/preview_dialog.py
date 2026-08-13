@@ -7,12 +7,15 @@ import math
 import os
 from pathlib import Path
 import tempfile
+import threading
 
-from PySide6.QtCore import QMimeData, QPointF, QRectF, Qt, QUrl, Signal
+from PySide6.QtCore import QMimeData, QObject, QPointF, QRectF, QSize, Qt, QThread, QUrl, Signal
 from PySide6.QtGui import (
     QColor,
     QImage,
+    QImageReader,
     QMouseEvent,
+    QMovie,
     QPainter,
     QPen,
     QPolygonF,
@@ -35,6 +38,7 @@ from PySide6.QtWidgets import (
 )
 
 from .session import discard_unzoomed_recording, restore_unzoomed_recording
+from .gif_export import export_gif
 from .windows_shell import reveal_in_folder
 
 try:
@@ -52,6 +56,35 @@ class Annotation:
     color: QColor
     width: float
     text: str = ""
+
+
+class _GifPreviewWorker(QObject):
+    """Create the unzoomed GIF only when the user asks to preview/remove zoom."""
+
+    finished = Signal(str, str)
+
+    def __init__(self, source_path: str, output_path: str) -> None:
+        super().__init__()
+        self._source_path = source_path
+        self._output_path = output_path
+        self._cancelled = threading.Event()
+
+    def cancel(self) -> None:
+        self._cancelled.set()
+
+    def run(self) -> None:
+        result = export_gif(
+            self._source_path,
+            self._output_path,
+            1.0,
+            cancel_callback=self._cancelled.is_set,
+        )
+        if result.state == "processed":
+            self.finished.emit(result.output_path, "")
+        elif result.state == "cancelled":
+            self.finished.emit("", "GIF preparation was cancelled.")
+        else:
+            self.finished.emit("", result.error or "Could not prepare the original GIF.")
 
 
 def _draw_annotation(painter: QPainter, annotation: Annotation) -> None:
@@ -349,6 +382,12 @@ class CapturePreviewDialog(QDialog):
         self._player = None
         self._audio = None
         self._video_widget = None
+        self._gif_label: QLabel | None = None
+        self._gif_movie: QMovie | None = None
+        self._gif_original_path = ""
+        self._gif_pending_path = ""
+        self._gif_thread: QThread | None = None
+        self._gif_worker: _GifPreviewWorker | None = None
         self._play_button: QPushButton | None = None
         self._remove_zoom: QCheckBox | None = None
         self._zoom_status: QLabel | None = None
@@ -379,8 +418,11 @@ class CapturePreviewDialog(QDialog):
         header = QLabel(Path(self.capture_path).name)
         header.setStyleSheet("font-size: 16px; font-weight: 650; color: white;")
         root.addWidget(header)
-        if Path(self.capture_path).suffix.lower() in {".png", ".jpg", ".jpeg"}:
+        suffix = Path(self.capture_path).suffix.lower()
+        if suffix in {".png", ".jpg", ".jpeg"}:
             self._build_image_preview(root)
+        elif suffix == ".gif":
+            self._build_gif_preview(root)
         else:
             self._build_video_preview(root)
         root.addLayout(self._common_actions())
@@ -451,6 +493,45 @@ class CapturePreviewDialog(QDialog):
         controls.addWidget(self._position, 1)
         root.addLayout(controls)
         self._build_zoom_choice(root)
+
+    def _build_gif_preview(self, root: QVBoxLayout) -> None:
+        label = QLabel()
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label.setMinimumHeight(420)
+        label.setStyleSheet("background: #0b1220; border-radius: 8px;")
+        self._gif_label = label
+        root.addWidget(label, 1)
+        movie = QMovie(self.capture_path)
+        self._gif_movie = movie
+        label.setMovie(movie)
+        self._set_gif_source(self.capture_path)
+        controls = QHBoxLayout()
+        self._play_button = QPushButton("Pause")
+        self._play_button.clicked.connect(self._toggle_gif_playback)
+        controls.addWidget(self._play_button)
+        controls.addStretch(1)
+        note = QLabel("Animated GIF · loops automatically · no audio")
+        note.setStyleSheet("color: #91a6bd;")
+        controls.addWidget(note)
+        root.addLayout(controls)
+        self._build_zoom_choice(root)
+
+    def _set_gif_source(self, path: str) -> None:
+        if self._gif_movie is None:
+            return
+        self._gif_movie.stop()
+        self._gif_movie.setFileName(path)
+        source_size = QImageReader(path).size()
+        if source_size.isValid():
+            self._gif_movie.setScaledSize(
+                source_size.scaled(
+                    QSize(920, 520),
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                )
+            )
+        self._gif_movie.start()
+        if self._play_button is not None:
+            self._play_button.setText("Pause")
 
     def _build_zoom_choice(self, root: QVBoxLayout) -> None:
         if not self._unzoomed_path:
@@ -534,6 +615,19 @@ class CapturePreviewDialog(QDialog):
                     pass
 
     def _preview_zoom_choice(self, remove_zoom: bool) -> None:
+        if self._gif_movie is not None:
+            if not remove_zoom:
+                self._set_gif_source(self.capture_path)
+                if self._zoom_status is not None:
+                    self._zoom_status.setText("Automatic Smart Zoom applied")
+                return
+            if self._gif_original_path and os.path.isfile(self._gif_original_path):
+                self._set_gif_source(self._gif_original_path)
+                if self._zoom_status is not None:
+                    self._zoom_status.setText("Previewing original GIF")
+                return
+            self._prepare_original_gif()
+            return
         if self._player is None or not self._unzoomed_path:
             return
         self._player.stop()
@@ -546,21 +640,89 @@ class CapturePreviewDialog(QDialog):
                 else "Automatic Smart Zoom applied"
             )
 
+    def _prepare_original_gif(self) -> None:
+        if not self._unzoomed_path or self._gif_thread is not None:
+            return
+        with tempfile.NamedTemporaryFile(suffix=".gif", delete=False) as handle:
+            output_path = handle.name
+        try:
+            os.remove(output_path)
+        except OSError:
+            pass
+        thread = QThread(self)
+        worker = _GifPreviewWorker(self._unzoomed_path, output_path)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._original_gif_ready)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._gif_thread_finished)
+        self._gif_thread = thread
+        self._gif_worker = worker
+        self._gif_pending_path = output_path
+        if self._remove_zoom is not None:
+            self._remove_zoom.setEnabled(False)
+        if self._save_button is not None:
+            self._save_button.setEnabled(False)
+        if self._zoom_status is not None:
+            self._zoom_status.setText("Preparing original GIF…")
+        thread.start()
+
+    def _original_gif_ready(self, path: str, error: str) -> None:
+        if path and os.path.isfile(path):
+            self._gif_original_path = os.path.abspath(path)
+            self._gif_pending_path = ""
+            if self._remove_zoom is not None and self._remove_zoom.isChecked():
+                self._set_gif_source(self._gif_original_path)
+                if self._zoom_status is not None:
+                    self._zoom_status.setText("Previewing original GIF")
+        else:
+            discard_unzoomed_recording(self._gif_pending_path)
+            self._gif_pending_path = ""
+            if self._remove_zoom is not None:
+                self._remove_zoom.blockSignals(True)
+                self._remove_zoom.setChecked(False)
+                self._remove_zoom.blockSignals(False)
+            if self._zoom_status is not None:
+                self._zoom_status.setText(error or "Could not prepare original GIF")
+        if self._remove_zoom is not None:
+            self._remove_zoom.setEnabled(bool(self._unzoomed_path))
+        if self._save_button is not None:
+            self._save_button.setEnabled(True)
+
+    def _gif_thread_finished(self) -> None:
+        self._gif_thread = None
+        self._gif_worker = None
+
     def _save_video(self) -> None:
         remove_zoom = self._remove_zoom is not None and self._remove_zoom.isChecked()
         if self._player is not None:
             self._player.stop()
             self._player.setSource(QUrl())
-        if remove_zoom and self._unzoomed_path:
+        if self._gif_movie is not None:
+            self._gif_movie.stop()
+            # QMovie keeps its current GIF handle open on Windows. Release it
+            # before atomically replacing or deleting a previewed draft.
+            self._gif_movie.setFileName("")
+        restore_source = self._unzoomed_path
+        if self._gif_movie is not None and remove_zoom:
+            if not self._gif_original_path or not os.path.isfile(self._gif_original_path):
+                raise RuntimeError("The original GIF is still being prepared")
+            restore_source = self._gif_original_path
+        if remove_zoom and restore_source:
             warning = restore_unzoomed_recording(
                 self.capture_path,
-                self._unzoomed_path,
+                restore_source,
             )
             if warning:
                 QMessageBox.warning(self, "Recording saved", warning)
+            if restore_source != self._unzoomed_path:
+                discard_unzoomed_recording(self._unzoomed_path)
         else:
             discard_unzoomed_recording(self._unzoomed_path)
+            discard_unzoomed_recording(self._gif_original_path)
         self._unzoomed_path = ""
+        self._gif_original_path = ""
         if self._remove_zoom is not None:
             self._remove_zoom.setEnabled(False)
         if self._zoom_status is not None:
@@ -571,6 +733,8 @@ class CapturePreviewDialog(QDialog):
             )
         if self._player is not None:
             self._player.setSource(QUrl.fromLocalFile(self.capture_path))
+        if self._gif_movie is not None:
+            self._set_gif_source(self.capture_path)
         self._mark_saved()
 
     def _copy_capture(self) -> None:
@@ -592,6 +756,18 @@ class CapturePreviewDialog(QDialog):
         else:
             self._player.play()
 
+    def _toggle_gif_playback(self) -> None:
+        if self._gif_movie is None:
+            return
+        if self._gif_movie.state() == QMovie.MovieState.Running:
+            self._gif_movie.setPaused(True)
+            if self._play_button is not None:
+                self._play_button.setText("Play")
+        else:
+            self._gif_movie.setPaused(False)
+            if self._play_button is not None:
+                self._play_button.setText("Pause")
+
     def _playback_changed(self, state) -> None:
         if self._play_button is not None:
             self._play_button.setText(
@@ -603,7 +779,21 @@ class CapturePreviewDialog(QDialog):
     def closeEvent(self, event) -> None:
         if self._player is not None:
             self._player.stop()
+        if self._gif_movie is not None:
+            self._gif_movie.stop()
+            self._gif_movie.setFileName("")
+        if self._gif_thread is not None and self._gif_thread.isRunning():
+            if self._gif_worker is not None:
+                self._gif_worker.cancel()
+            self._gif_thread.quit()
+            if not self._gif_thread.wait(5000):
+                event.ignore()
+                return
         if not self._saved:
             discard_unzoomed_recording(self._unzoomed_path)
+            discard_unzoomed_recording(self._gif_original_path)
+            discard_unzoomed_recording(self._gif_pending_path)
             self._unzoomed_path = ""
+            self._gif_original_path = ""
+            self._gif_pending_path = ""
         super().closeEvent(event)

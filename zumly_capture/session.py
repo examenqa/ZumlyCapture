@@ -178,7 +178,7 @@ def publish_recording(
     output_path: str | os.PathLike[str],
     session: CaptureSession,
 ) -> CapturePublishResult:
-    """Publish a non-empty MP4 without overwriting existing media.
+    """Publish a non-empty recording without overwriting existing media.
 
     The recording is copied to a staging file in the destination directory and
     renamed into its final name. On Windows this same-volume rename is atomic
@@ -193,7 +193,7 @@ def publish_recording(
     if Path(session.media_path).resolve() != output:
         raise ValueError("Capture session media path must match the publish destination")
     if not source.is_file() or source.stat().st_size <= 0:
-        raise ValueError(f"Capture engine did not produce a usable video: {source}")
+        raise ValueError(f"Capture engine did not produce a usable recording: {source}")
     if output.exists():
         raise FileExistsError(f"Capture output already exists: {output}")
 

@@ -48,9 +48,15 @@ editor or exporter. The tray exposes actions to open, copy, or reveal the last
 capture while retaining pause/resume support. Hardware WGC remains available
 through a NumPy-free native adapter, with a NumPy-free GDI fallback.
 
-Each successful recording publishes only its directly playable MP4. Capture
+Each successful recording publishes only its directly playable media file. Capture
 telemetry and Smart Zoom processing data remain internal and do not leave JSON
 sidecars in the user's output folder.
+
+Recording output can be switched between MP4 and animated GIF in Settings.
+MP4 remains the default and supports configured audio devices. GIF output loops
+automatically, omits audio, uses a palette-based 15 FPS encoder, and limits the
+longest edge to 1280 pixels so the result remains practical to share. Smart Zoom
+is applied before GIF conversion and can still be removed from the preview.
 
 Copied editor modules remain in the transitional seed tree, but they are no
 longer imported or launched by the capture worker or tray completion flow.

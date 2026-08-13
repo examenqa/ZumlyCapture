@@ -24,10 +24,11 @@ def default_screenshot_folder() -> str:
 
 
 DEFAULT_SETTINGS: dict[str, Any] = {
-    "settings_schema_version": 2,
+    "settings_schema_version": 3,
     "output_folder": default_output_folder(),
     "screenshot_folder": default_screenshot_folder(),
     "screenshot_format": "png",
+    "recording_format": "mp4",
     "copy_screenshot": True,
     "screenshot_delay_seconds": 0,
     "fps": 60,
@@ -91,13 +92,17 @@ def normalize_settings(value: dict[str, Any] | None) -> dict[str, Any]:
         settings["preview_after_capture"] = True
         settings["smart_zoom_enabled"] = True
         settings["render_cursor"] = True
-    settings["settings_schema_version"] = 2
+    settings["settings_schema_version"] = 3
     settings["output_folder"] = str(settings.get("output_folder") or default_output_folder())
     settings["screenshot_folder"] = str(
         settings.get("screenshot_folder") or default_screenshot_folder()
     )
     fmt = str(settings.get("screenshot_format", "png")).lower()
     settings["screenshot_format"] = fmt if fmt in {"png", "jpg"} else "png"
+    recording_format = str(settings.get("recording_format", "mp4")).lower()
+    settings["recording_format"] = (
+        recording_format if recording_format in {"mp4", "gif"} else "mp4"
+    )
     settings["copy_screenshot"] = bool(settings.get("copy_screenshot", True))
     settings["screenshot_delay_seconds"] = _bounded_int(
         settings.get("screenshot_delay_seconds"), 0, 0, 10

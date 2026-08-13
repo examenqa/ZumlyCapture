@@ -9,6 +9,7 @@ import uuid
 from dataclasses import dataclass
 
 from zumly_capture.audio import AudioCapture, cleanup_audio_tracks, mux_audio_tracks
+from zumly_capture.gif_export import export_gif
 from zumly_capture.identity import FILE_PREFIX, PRODUCT_NAME
 from zumly_capture.session import (
     CaptureSession,
@@ -327,6 +328,19 @@ def _record_media(
 
 
 def _run(args: argparse.Namespace) -> int:
+    output_format = str(getattr(args, "output_format", "mp4") or "mp4").lower()
+    if output_format not in {"mp4", "gif"}:
+        return _failure(args.result_file, f"Unsupported recording format: {output_format}")
+    expected_suffix = f".{output_format}"
+    if os.path.splitext(os.path.abspath(args.out))[1].lower() != expected_suffix:
+        return _failure(
+            args.result_file,
+            f"{output_format.upper()} output must use the {expected_suffix} extension",
+        )
+    if output_format == "gif":
+        # GIF has no audio stream. Avoid starting audio capture or muxing work.
+        args.microphone = ""
+        args.system_audio = ""
     target_kind = str(args.target_kind or "monitor").lower()
     capture_rect: dict = {}
     capture_target: dict = {"kind": target_kind}
@@ -539,6 +553,64 @@ def _run(args: argparse.Namespace) -> int:
             warnings.append("Smart Zoom could not be applied; the unprocessed recording was saved.")
             logging.exception("Smart Zoom orchestration failed; preserving source video: %s", exc)
 
+    if output_format == "gif":
+        gif_handle = tempfile.NamedTemporaryFile(suffix=".gif", delete=False)
+        gif_path = gif_handle.name
+        gif_handle.close()
+        try:
+            os.remove(gif_path)
+        except OSError:
+            pass
+        conversion_sequence = [last_control_sequence]
+
+        def gif_cancelled() -> bool:
+            sequence, action = _read_control_payload(
+                args.control_file,
+                conversion_sequence[0],
+            )
+            if action:
+                conversion_sequence[0] = sequence
+            return action == "cancel"
+
+        def gif_progress(progress: int) -> None:
+            _write_status_payload(
+                args.status_file,
+                conversion_sequence[0],
+                RecordingState.PROCESSING,
+                timeline_clock,
+                phase="gif_export",
+                progress=max(0, min(100, int(progress))),
+            )
+
+        video_source = publication_source
+        gif_result = export_gif(
+            video_source,
+            gif_path,
+            duration_ms,
+            progress_callback=gif_progress,
+            cancel_callback=gif_cancelled,
+        )
+        if gif_result.state != "processed" or not gif_result.output_path:
+            discard_unzoomed_recording(unzoomed_path)
+            message = (
+                "GIF creation was cancelled."
+                if gif_result.state == "cancelled"
+                else f"Could not create GIF: {gif_result.error or 'unknown error'}"
+            )
+            recovery_path = os.path.abspath(video_source) if os.path.isfile(video_source) else ""
+            if video_source != raw_video_path:
+                try:
+                    os.remove(raw_video_path)
+                except OSError:
+                    pass
+            return _failure(args.result_file, message, recoveryPath=recovery_path)
+        publication_source = gif_result.output_path
+        if video_source != raw_video_path:
+            try:
+                os.remove(video_source)
+            except OSError:
+                pass
+
     session = CaptureSession(
         session_id=session_id,
         media_path=output_path,
@@ -559,7 +631,7 @@ def _run(args: argparse.Namespace) -> int:
         smart_zoom=smart_zoom_manifest,
     )
 
-    logging.info("Recording stopped. Publishing video to %s", output_path)
+    logging.info("Recording stopped. Publishing %s to %s", output_format.upper(), output_path)
     try:
         published = publish_recording(publication_source, output_path, session)
     except Exception as exc:
@@ -611,9 +683,20 @@ def _run(args: argparse.Namespace) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=f"{PRODUCT_NAME} capture worker")
-    parser.add_argument("--out", "-o", required=True, help="Output MP4 path")
+    parser.add_argument(
+        "--out",
+        "-o",
+        required=True,
+        help="Output media path (.mp4 or .gif)",
+    )
     parser.add_argument("--monitor", "-m", type=int, default=1, help="Monitor index (default 1)")
     parser.add_argument("--fps", type=int, default=60, help="Recording FPS")
+    parser.add_argument(
+        "--output-format",
+        choices=("mp4", "gif"),
+        default="mp4",
+        help="Published recording format (default: mp4)",
+    )
     parser.add_argument(
         "--target-kind",
         choices=("monitor", "window", "region"),

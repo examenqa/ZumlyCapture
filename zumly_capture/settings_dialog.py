@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QKeySequenceEdit,
     QLineEdit,
+    QLabel,
     QPushButton,
     QSpinBox,
     QTabWidget,
@@ -83,6 +84,20 @@ class CaptureSettingsDialog(QDialog):
         self._format.addItem("JPEG", "jpg")
         self._format.setCurrentIndex(max(0, self._format.findData(self._settings["screenshot_format"])))
         form.addRow("Screenshot format:", self._format)
+        self._recording_format = QComboBox()
+        self._recording_format.addItem("MP4 video", "mp4")
+        self._recording_format.addItem("Animated GIF", "gif")
+        self._recording_format.setCurrentIndex(
+            max(0, self._recording_format.findData(self._settings["recording_format"]))
+        )
+        form.addRow("Recording format:", self._recording_format)
+        gif_note = QLabel(
+            "GIFs loop automatically and are optimized to 15 FPS with a 1280 px "
+            "maximum edge. GIF does not support audio."
+        )
+        gif_note.setWordWrap(True)
+        gif_note.setStyleSheet("color: #60758a;")
+        form.addRow("", gif_note)
         self._copy_screenshot = QCheckBox("Copy screenshots to clipboard")
         self._copy_screenshot.setChecked(self._settings["copy_screenshot"])
         form.addRow("", self._copy_screenshot)
@@ -225,6 +240,7 @@ class CaptureSettingsDialog(QDialog):
                 "output_folder": self._output_folder.text().strip(),
                 "screenshot_folder": self._screenshot_folder.text().strip(),
                 "screenshot_format": self._format.currentData(),
+                "recording_format": self._recording_format.currentData(),
                 "copy_screenshot": self._copy_screenshot.isChecked(),
                 "preview_after_capture": self._preview_after_capture.isChecked(),
                 "screenshot_delay_seconds": self._screenshot_delay.value(),

@@ -55,6 +55,7 @@ def test_settings_normalize_and_roundtrip(tmp_path: Path) -> None:
             "monitor": 2,
             "countdown_seconds": -2,
             "screenshot_format": "JPEG",
+            "recording_format": "GIF",
             "record_monitor_hotkey": "Alt+F9",
             "settings_schema_version": 2,
             "smart_zoom_level": 9,
@@ -65,6 +66,7 @@ def test_settings_normalize_and_roundtrip(tmp_path: Path) -> None:
     assert saved["fps"] == 120
     assert saved["countdown_seconds"] == 0
     assert saved["screenshot_format"] == "png"
+    assert saved["recording_format"] == "gif"
     assert saved["smart_zoom_level"] == 3.0
     assert load_settings(path) == saved
     assert json.loads(path.read_text(encoding="utf-8"))["monitor"] == 2
@@ -94,6 +96,13 @@ def test_default_recording_location_and_countdown_are_lightweight() -> None:
 
     assert Path(default_output_folder()).parts[-2:] == ("Videos", "Zumly Capture")
     assert settings["countdown_seconds"] == 1
+    assert settings["recording_format"] == "mp4"
+
+
+def test_invalid_recording_format_falls_back_to_mp4() -> None:
+    settings = normalize_settings({"recording_format": "webm"})
+
+    assert settings["recording_format"] == "mp4"
 
 
 def test_show_in_folder_opens_the_capture_parent(

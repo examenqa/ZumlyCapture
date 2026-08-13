@@ -708,7 +708,10 @@ class QtZumlyCaptureTray(QObject):
         self._state = RecordingState.STARTING
         self._cfg = load_settings()
         os.makedirs(self._cfg["output_folder"], exist_ok=True)
-        out_path = self._next_output_path(self._cfg["output_folder"], "mp4")
+        recording_format = str(self._cfg.get("recording_format", "mp4")).lower()
+        if recording_format not in {"mp4", "gif"}:
+            recording_format = "mp4"
+        out_path = self._next_output_path(self._cfg["output_folder"], recording_format)
 
         if getattr(sys, "frozen", False):
             command = [sys.executable, "--headless-engine"]
@@ -718,6 +721,7 @@ class QtZumlyCaptureTray(QObject):
             "--out", out_path,
             "--monitor", str(target.get("monitorIndex", self._cfg.get("monitor", 1))),
             "--fps", str(self._cfg.get("fps", 60)),
+            "--output-format", recording_format,
             "--target-kind", str(target.get("kind", "monitor")),
         ]
         if target.get("kind") == "window":
@@ -733,9 +737,9 @@ class QtZumlyCaptureTray(QObject):
             ]
         microphone = str(self._cfg.get("microphone_device", "") or "")
         system_audio = str(self._cfg.get("system_audio_device", "") or "")
-        if microphone:
+        if microphone and recording_format == "mp4":
             command += ["--microphone", microphone]
-        if system_audio:
+        if system_audio and recording_format == "mp4":
             command += ["--system-audio", system_audio]
         if bool(self._cfg.get("smart_zoom_enabled", False)):
             command += [
@@ -942,7 +946,11 @@ class QtZumlyCaptureTray(QObject):
                 progress = max(0, min(100, int(payload.get("progress", 0))))
             except (TypeError, ValueError):
                 progress = 0
-            self._update_tray(f"Applying Smart Zoom... {progress}%")
+            phase = str(payload.get("phase", "smart_zoom"))
+            if phase == "gif_export":
+                self._update_tray(f"Creating GIF... {progress}%")
+            else:
+                self._update_tray(f"Applying Smart Zoom... {progress}%")
             if self._toggle_action is not None:
                 self._toggle_action.setEnabled(True)
 
@@ -1034,7 +1042,7 @@ class QtZumlyCaptureTray(QObject):
                 ): self._show_capture_preview(path, original),
             )
         else:
-            error = str(result.get("error", "") or "Recording engine did not publish a video")
+            error = str(result.get("error", "") or "Recording engine did not publish media")
             recovery_path = str(result.get("recoveryPath", "") or "")
             if recovery_path and os.path.isfile(recovery_path):
                 logger.warning("Completed recording remains recoverable at %s", recovery_path)
@@ -1068,7 +1076,7 @@ class QtZumlyCaptureTray(QObject):
                 RecordingState.PROCESSING,
             }
             if self._state == RecordingState.PROCESSING:
-                self._toggle_action.setText("Cancel Smart Zoom")
+                self._toggle_action.setText("Cancel Processing")
             else:
                 self._toggle_action.setText("Stop Recording" if active else "Start Recording")
         if self._pause_action is not None:
