@@ -16,21 +16,26 @@ from PySide6.QtGui import (
     QMouseEvent,
     QPainter,
     QPen,
+    QPolygonF,
 )
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
+    QCheckBox,
     QColorDialog,
     QDialog,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
+    QLineEdit,
+    QMessageBox,
     QPushButton,
     QSlider,
     QToolButton,
     QVBoxLayout,
     QWidget,
 )
+
+from .session import discard_unzoomed_recording, restore_unzoomed_recording
 
 try:
     from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
@@ -62,23 +67,41 @@ def _draw_annotation(painter: QPainter, annotation: Annotation) -> None:
             Qt.PenJoinStyle.RoundJoin,
         )
     )
+    painter.setBrush(Qt.BrushStyle.NoBrush)
     if annotation.kind in {"pen", "highlight"}:
         painter.drawLine(annotation.start, annotation.end)
     elif annotation.kind == "rectangle":
         painter.drawRect(QRectF(annotation.start, annotation.end).normalized())
     elif annotation.kind == "arrow":
-        painter.drawLine(annotation.start, annotation.end)
-        angle = math.atan2(
-            annotation.end.y() - annotation.start.y(),
-            annotation.end.x() - annotation.start.x(),
+        dx = annotation.end.x() - annotation.start.x()
+        dy = annotation.end.y() - annotation.start.y()
+        length = math.hypot(dx, dy)
+        if length <= 0.5:
+            painter.setBrush(color)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawEllipse(annotation.start, annotation.width, annotation.width)
+            return
+        direction = QPointF(dx / length, dy / length)
+        perpendicular = QPointF(-direction.y(), direction.x())
+        stem_half = max(2.5, annotation.width * 0.7)
+        head_length = min(length * 0.55, max(24.0, annotation.width * 5.5))
+        head_half = max(13.0, annotation.width * 2.7)
+        neck = annotation.end - direction * head_length
+        polygon = QPolygonF(
+            [
+                annotation.start - perpendicular * stem_half,
+                neck - perpendicular * stem_half,
+                neck - perpendicular * head_half,
+                annotation.end,
+                neck + perpendicular * head_half,
+                neck + perpendicular * stem_half,
+                annotation.start + perpendicular * stem_half,
+            ]
         )
-        size = max(12.0, annotation.width * 4.0)
-        for offset in (math.pi * 0.84, -math.pi * 0.84):
-            tip = QPointF(
-                annotation.end.x() + math.cos(angle + offset) * size,
-                annotation.end.y() + math.sin(angle + offset) * size,
-            )
-            painter.drawLine(annotation.end, tip)
+        painter.setBrush(color)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawPolygon(polygon)
+        painter.drawEllipse(annotation.start, stem_half, stem_half)
     elif annotation.kind == "text":
         font = painter.font()
         font.setBold(True)
@@ -98,6 +121,45 @@ def render_annotations(image: QImage, annotations: list[Annotation]) -> QImage:
     return rendered
 
 
+class InlineTextEdit(QLineEdit):
+    """A single-line text editor positioned directly over the screenshot."""
+
+    committed = Signal(str)
+    cancelled = Signal()
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self._finished = False
+        self.setPlaceholderText("Type annotation…")
+        self.setMinimumSize(220, 38)
+        self.setMaxLength(240)
+
+    def _finish(self, commit: bool) -> None:
+        if self._finished:
+            return
+        self._finished = True
+        text = self.text().strip()
+        if commit and text:
+            self.committed.emit(text)
+        else:
+            self.cancelled.emit()
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() in {Qt.Key.Key_Return, Qt.Key.Key_Enter}:
+            self._finish(True)
+            event.accept()
+            return
+        if event.key() == Qt.Key.Key_Escape:
+            self._finish(False)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def focusOutEvent(self, event) -> None:
+        self._finish(True)
+        super().focusOutEvent(event)
+
+
 class AnnotationCanvas(QWidget):
     changed = Signal()
 
@@ -111,6 +173,8 @@ class AnnotationCanvas(QWidget):
         self._color = QColor("#ff4d67")
         self._start: QPointF | None = None
         self._preview: Annotation | None = None
+        self._inline_editor: InlineTextEdit | None = None
+        self._inline_origin: QPointF | None = None
         self.setMinimumSize(640, 380)
         self.setMouseTracking(True)
         self.setCursor(Qt.CursorShape.CrossCursor)
@@ -134,6 +198,52 @@ class AnnotationCanvas(QWidget):
 
     def rendered_image(self) -> QImage:
         return render_annotations(self._image, self._annotations)
+
+    def _begin_inline_text(self, image_point: QPointF, widget_point: QPointF) -> None:
+        if self._inline_editor is not None:
+            self._inline_editor._finish(True)
+        editor = InlineTextEdit(self)
+        editor.setStyleSheet(
+            f"""
+            QLineEdit {{
+                color: {self._color.name()};
+                background: rgba(15, 23, 42, 220);
+                border: 2px solid {self._color.name()};
+                border-radius: 6px;
+                padding: 5px 8px;
+                font-size: 18px;
+                font-weight: 700;
+            }}
+            """
+        )
+        x = max(0, min(int(widget_point.x()), max(0, self.width() - editor.width())))
+        y = max(0, min(int(widget_point.y()) - 19, max(0, self.height() - 38)))
+        editor.move(x, y)
+        self._inline_editor = editor
+        self._inline_origin = QPointF(image_point)
+        editor.committed.connect(self._commit_inline_text)
+        editor.cancelled.connect(self._clear_inline_text)
+        editor.show()
+        editor.raise_()
+        editor.setFocus(Qt.FocusReason.MouseFocusReason)
+
+    def _commit_inline_text(self, text: str) -> None:
+        origin = self._inline_origin
+        if origin is not None and text.strip():
+            self._annotations.append(
+                Annotation("text", origin, origin, self._color, 4.0, text.strip())
+            )
+            self.changed.emit()
+            self.update()
+        self._clear_inline_text()
+
+    def _clear_inline_text(self) -> None:
+        editor = self._inline_editor
+        self._inline_editor = None
+        self._inline_origin = None
+        if editor is not None:
+            editor.hide()
+            editor.deleteLater()
 
     def _image_rect(self) -> QRectF:
         scale = min(
@@ -176,13 +286,7 @@ class AnnotationCanvas(QWidget):
         if point is None:
             return
         if self._tool == "text":
-            text, accepted = QInputDialog.getText(self, "Add text", "Annotation text:")
-            if accepted and text.strip():
-                self._annotations.append(
-                    Annotation("text", point, point, self._color, 4.0, text.strip())
-                )
-                self.changed.emit()
-                self.update()
+            self._begin_inline_text(point, event.position())
             return
         self._start = point
         self._preview = Annotation(
@@ -230,12 +334,26 @@ class AnnotationCanvas(QWidget):
 class CapturePreviewDialog(QDialog):
     saved = Signal(str)
 
-    def __init__(self, capture_path: str, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        capture_path: str,
+        parent: QWidget | None = None,
+        *,
+        unzoomed_path: str = "",
+    ) -> None:
         super().__init__(parent)
         self.capture_path = os.path.abspath(capture_path)
+        candidate = os.path.abspath(unzoomed_path) if unzoomed_path else ""
+        self._unzoomed_path = candidate if candidate and os.path.isfile(candidate) else ""
+        self._saved = False
         self._player = None
         self._audio = None
+        self._video_widget = None
         self._play_button: QPushButton | None = None
+        self._remove_zoom: QCheckBox | None = None
+        self._zoom_status: QLabel | None = None
+        self._reveal_button: QPushButton | None = None
+        self._save_button: QPushButton | None = None
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.setWindowTitle(f"Preview · {Path(self.capture_path).name}")
         self.resize(980, 690)
@@ -249,6 +367,10 @@ class CapturePreviewDialog(QDialog):
             }
             QPushButton:hover, QToolButton:hover { background: #356da8; }
             QToolButton:checked { background: #2f7fca; border-color: #70b7ff; }
+            QPushButton:disabled { color: #718096; background: #1b2637; border-color: #2c3a4d; }
+            QCheckBox { color: #d6e4f5; spacing: 8px; padding: 5px; }
+            QSlider::groove:horizontal { height: 5px; background: #33445b; border-radius: 2px; }
+            QSlider::handle:horizontal { width: 14px; margin: -5px 0; background: #66aef2; border-radius: 7px; }
             """
         )
         root = QVBoxLayout(self)
@@ -265,7 +387,14 @@ class CapturePreviewDialog(QDialog):
 
     def _build_image_preview(self, root: QVBoxLayout) -> None:
         self._canvas = AnnotationCanvas(self.capture_path)
-        toolbar = QHBoxLayout()
+        root.addWidget(self._canvas, 1)
+        toolbar_shell = QWidget()
+        toolbar_shell.setStyleSheet(
+            "background: #202c3d; border: 1px solid #34465d; border-radius: 9px;"
+        )
+        toolbar = QHBoxLayout(toolbar_shell)
+        toolbar.setContentsMargins(7, 5, 7, 5)
+        toolbar.setSpacing(5)
         group = QButtonGroup(self)
         group.setExclusive(True)
         for label, tool in (
@@ -289,21 +418,21 @@ class CapturePreviewDialog(QDialog):
         undo.clicked.connect(self._canvas.undo)
         toolbar.addWidget(undo)
         toolbar.addStretch(1)
-        save = QPushButton("Save annotations")
-        save.setStyleSheet("background: #2f7fca; font-weight: 650;")
-        save.clicked.connect(self._save_image)
-        toolbar.addWidget(save)
-        root.addLayout(toolbar)
-        root.addWidget(self._canvas, 1)
+        hint = QLabel("Text: click the canvas and type")
+        hint.setStyleSheet("color: #91a6bd; padding-right: 6px;")
+        toolbar.addWidget(hint)
+        root.addWidget(toolbar_shell)
 
     def _build_video_preview(self, root: QVBoxLayout) -> None:
         if QMediaPlayer is None or QVideoWidget is None or QAudioOutput is None:
-            message = QLabel("Video preview components are unavailable. Use Open to play the recording.")
+            message = QLabel("Video preview components are unavailable.")
             message.setAlignment(Qt.AlignmentFlag.AlignCenter)
             root.addWidget(message, 1)
+            self._build_zoom_choice(root)
             return
         video = QVideoWidget()
         video.setMinimumHeight(420)
+        self._video_widget = video
         root.addWidget(video, 1)
         self._player = QMediaPlayer(self)
         self._audio = QAudioOutput(self)
@@ -321,27 +450,64 @@ class CapturePreviewDialog(QDialog):
         self._player.playbackStateChanged.connect(self._playback_changed)
         controls.addWidget(self._position, 1)
         root.addLayout(controls)
+        self._build_zoom_choice(root)
+
+    def _build_zoom_choice(self, root: QVBoxLayout) -> None:
+        if not self._unzoomed_path:
+            return
+        zoom_row = QHBoxLayout()
+        self._zoom_status = QLabel("Automatic Smart Zoom applied")
+        self._zoom_status.setStyleSheet("color: #9ecbff; font-weight: 650;")
+        zoom_row.addWidget(self._zoom_status)
+        zoom_row.addStretch(1)
+        self._remove_zoom = QCheckBox("Remove automatic Smart Zoom")
+        self._remove_zoom.toggled.connect(self._preview_zoom_choice)
+        zoom_row.addWidget(self._remove_zoom)
+        root.addLayout(zoom_row)
 
     def _common_actions(self) -> QHBoxLayout:
         row = QHBoxLayout()
-        row.addStretch(1)
         copy = QPushButton("Copy")
         copy.clicked.connect(self._copy_capture)
         row.addWidget(copy)
-        reveal = QPushButton("Show in folder")
-        reveal.clicked.connect(self._reveal_capture)
-        row.addWidget(reveal)
-        open_button = QPushButton("Open")
-        open_button.clicked.connect(self._open_capture)
-        row.addWidget(open_button)
-        close = QPushButton("Done")
+        self._reveal_button = QPushButton("Show in folder")
+        self._reveal_button.setEnabled(False)
+        self._reveal_button.clicked.connect(self._reveal_capture)
+        row.addWidget(self._reveal_button)
+        row.addStretch(1)
+        close = QPushButton("Close")
         close.clicked.connect(self.close)
         row.addWidget(close)
+        self._save_button = QPushButton("Save")
+        self._save_button.setStyleSheet(
+            "background: #2f7fca; border-color: #62aaf0; font-weight: 700;"
+        )
+        self._save_button.clicked.connect(self._save_capture)
+        row.addWidget(self._save_button)
         return row
 
     def _choose_color(self) -> None:
         chosen = QColorDialog.getColor(QColor("#ff4d67"), self, "Annotation color")
         self._canvas.set_color(chosen)
+
+    def _save_capture(self) -> None:
+        try:
+            if hasattr(self, "_canvas"):
+                self._save_image()
+            else:
+                self._save_video()
+        except Exception as exc:
+            QMessageBox.critical(self, "Could not save", str(exc))
+
+    def _mark_saved(self) -> None:
+        self._saved = True
+        if self._reveal_button is not None:
+            self._reveal_button.setEnabled(True)
+        if self._save_button is not None:
+            self._save_button.setText("Saved")
+            self._save_button.setEnabled(False)
+        self.saved.emit(self.capture_path)
+        self.setWindowTitle(f"Saved · {Path(self.capture_path).name}")
 
     def _save_image(self) -> None:
         image = self._canvas.rendered_image()
@@ -359,14 +525,53 @@ class CapturePreviewDialog(QDialog):
                 raise OSError("Qt could not encode the annotated screenshot")
             os.replace(temp_path, self.capture_path)
             temp_path = ""
-            self.saved.emit(self.capture_path)
-            self.setWindowTitle(f"Saved · {Path(self.capture_path).name}")
+            self._mark_saved()
         finally:
             if temp_path:
                 try:
                     os.remove(temp_path)
                 except OSError:
                     pass
+
+    def _preview_zoom_choice(self, remove_zoom: bool) -> None:
+        if self._player is None or not self._unzoomed_path:
+            return
+        self._player.stop()
+        source = self._unzoomed_path if remove_zoom else self.capture_path
+        self._player.setSource(QUrl.fromLocalFile(source))
+        if self._zoom_status is not None:
+            self._zoom_status.setText(
+                "Previewing original recording"
+                if remove_zoom
+                else "Automatic Smart Zoom applied"
+            )
+
+    def _save_video(self) -> None:
+        remove_zoom = self._remove_zoom is not None and self._remove_zoom.isChecked()
+        if self._player is not None:
+            self._player.stop()
+            self._player.setSource(QUrl())
+        if remove_zoom and self._unzoomed_path:
+            warning = restore_unzoomed_recording(
+                self.capture_path,
+                self._unzoomed_path,
+            )
+            if warning:
+                QMessageBox.warning(self, "Recording saved", warning)
+        else:
+            discard_unzoomed_recording(self._unzoomed_path)
+        self._unzoomed_path = ""
+        if self._remove_zoom is not None:
+            self._remove_zoom.setEnabled(False)
+        if self._zoom_status is not None:
+            self._zoom_status.setText(
+                "Automatic Smart Zoom removed"
+                if remove_zoom
+                else "Automatic Smart Zoom saved"
+            )
+        if self._player is not None:
+            self._player.setSource(QUrl.fromLocalFile(self.capture_path))
+        self._mark_saved()
 
     def _copy_capture(self) -> None:
         if hasattr(self, "_canvas"):
@@ -381,9 +586,6 @@ class CapturePreviewDialog(QDialog):
             ["explorer.exe", f"/select,{self.capture_path}"],
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
-
-    def _open_capture(self) -> None:
-        os.startfile(self.capture_path)
 
     def _toggle_playback(self) -> None:
         if self._player is None:
@@ -400,3 +602,11 @@ class CapturePreviewDialog(QDialog):
                 if state == QMediaPlayer.PlaybackState.PlayingState
                 else "Play"
             )
+
+    def closeEvent(self, event) -> None:
+        if self._player is not None:
+            self._player.stop()
+        if not self._saved:
+            discard_unzoomed_recording(self._unzoomed_path)
+            self._unzoomed_path = ""
+        super().closeEvent(event)

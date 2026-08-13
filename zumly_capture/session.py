@@ -10,7 +10,7 @@ import shutil
 import tempfile
 from typing import Any
 
-from .identity import FILE_PREFIX
+from .identity import FILE_PREFIX, SETTINGS_DIRECTORY_NAME
 
 
 CAPTURE_SESSION_SCHEMA_VERSION = 1
@@ -74,6 +74,139 @@ def manifest_path_for(media_path: str | os.PathLike[str]) -> str:
     """Return the stable sidecar name for a published recording."""
     media = Path(media_path).resolve()
     return str(media.with_suffix(".zumly-capture.json"))
+
+
+def capture_drafts_directory() -> Path:
+    """Return the private per-user folder for reversible capture drafts."""
+    local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
+    root = Path(local_app_data) if local_app_data else Path(tempfile.gettempdir())
+    return root / SETTINGS_DIRECTORY_NAME / "Drafts"
+
+
+def preserve_unzoomed_recording(
+    source_path: str | os.PathLike[str],
+    session_id: str,
+) -> str:
+    """Copy the unzoomed recording to a private draft for post-capture removal."""
+    source = Path(source_path).resolve()
+    if not source.is_file() or source.stat().st_size <= 0:
+        raise ValueError(f"Unzoomed recording is not usable: {source}")
+    safe_session_id = "".join(
+        character for character in str(session_id) if character.isalnum() or character in "-_"
+    )
+    if not safe_session_id:
+        raise ValueError("A valid session id is required to preserve an unzoomed recording")
+
+    drafts = capture_drafts_directory()
+    drafts.mkdir(parents=True, exist_ok=True)
+    destination = drafts / f"{safe_session_id}.unzoomed.mp4"
+    if destination.exists():
+        raise FileExistsError(f"Unzoomed draft already exists: {destination}")
+
+    staged = ""
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=str(drafts),
+            prefix=f"{FILE_PREFIX}_unzoomed_",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            staged = handle.name
+            with source.open("rb") as source_handle:
+                shutil.copyfileobj(source_handle, handle, length=1024 * 1024)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.rename(staged, destination)
+        staged = ""
+        return str(destination)
+    finally:
+        if staged:
+            try:
+                os.remove(staged)
+            except OSError:
+                pass
+
+
+def discard_unzoomed_recording(path: str | os.PathLike[str]) -> None:
+    """Discard one preserved unzoomed draft without touching published media."""
+    if not path:
+        return
+    draft = Path(path)
+    try:
+        draft.unlink()
+    except FileNotFoundError:
+        return
+    try:
+        draft.parent.rmdir()
+    except OSError:
+        pass
+
+
+def restore_unzoomed_recording(
+    media_path: str | os.PathLike[str],
+    draft_path: str | os.PathLike[str],
+) -> str:
+    """Atomically replace a zoomed recording with its preserved original.
+
+    The video is restored first. Its sidecar is then updated to record that
+    automatic Smart Zoom was removed. A sidecar warning does not risk the media.
+    """
+    media = Path(media_path).resolve()
+    draft = Path(draft_path).resolve()
+    if not media.is_file() or media.stat().st_size <= 0:
+        raise ValueError(f"Published recording is not usable: {media}")
+    if not draft.is_file() or draft.stat().st_size <= 0:
+        raise ValueError(f"Unzoomed draft is not usable: {draft}")
+
+    staged = ""
+    warning = ""
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=str(media.parent),
+            prefix=f"{FILE_PREFIX}_restore_",
+            suffix=media.suffix,
+            delete=False,
+        ) as handle:
+            staged = handle.name
+            with draft.open("rb") as source_handle:
+                shutil.copyfileobj(source_handle, handle, length=1024 * 1024)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(staged, media)
+        staged = ""
+
+        manifest = Path(manifest_path_for(media))
+        if manifest.is_file():
+            try:
+                with manifest.open("r", encoding="utf-8") as handle:
+                    payload = json.load(handle)
+                if not isinstance(payload, dict):
+                    raise ValueError("capture manifest is not a JSON object")
+                smart_zoom = payload.get("smartZoom")
+                if not isinstance(smart_zoom, dict):
+                    smart_zoom = {}
+                smart_zoom.update({"state": "removed", "keyframes": []})
+                smart_zoom.pop("removableSourcePath", None)
+                payload["smartZoom"] = smart_zoom
+                manifest_stage = _stage_json(manifest.parent, payload)
+                try:
+                    os.replace(manifest_stage, manifest)
+                finally:
+                    if os.path.exists(manifest_stage):
+                        os.remove(manifest_stage)
+            except (OSError, ValueError, json.JSONDecodeError) as exc:
+                warning = f"Smart Zoom was removed, but metadata could not be updated: {exc}"
+
+        discard_unzoomed_recording(draft)
+        return warning
+    finally:
+        if staged:
+            try:
+                os.remove(staged)
+            except OSError:
+                pass
 
 
 def _stage_json(directory: Path, payload: dict[str, Any]) -> str:

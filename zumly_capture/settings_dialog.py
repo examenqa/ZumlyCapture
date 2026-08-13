@@ -173,7 +173,9 @@ class CaptureSettingsDialog(QDialog):
     def _smart_zoom_tab(self) -> QWidget:
         tab = QWidget()
         form = QFormLayout(tab)
-        self._smart_zoom = QCheckBox("Enable cursor-follow zoom after recording")
+        self._smart_zoom = QCheckBox(
+            "Enable automatic click-driven cursor-follow zoom after recording"
+        )
         self._smart_zoom.setChecked(self._settings["smart_zoom_enabled"])
         form.addRow("", self._smart_zoom)
         self._zoom_level = QDoubleSpinBox()

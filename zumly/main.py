@@ -10,7 +10,12 @@ from dataclasses import dataclass
 
 from zumly_capture.audio import AudioCapture, cleanup_audio_tracks, mux_audio_tracks
 from zumly_capture.identity import FILE_PREFIX, PRODUCT_NAME
-from zumly_capture.session import CaptureSession, publish_recording
+from zumly_capture.session import (
+    CaptureSession,
+    discard_unzoomed_recording,
+    preserve_unzoomed_recording,
+    publish_recording,
+)
 from zumly_capture.smart_zoom import render_smart_zoom
 
 from zumly.app.screen_recorder import ScreenRecorder
@@ -432,6 +437,7 @@ def _run(args: argparse.Namespace) -> int:
         "state": "not_processed",
         "keyframes": [],
     }
+    unzoomed_path = ""
     if args.smart_zoom:
         smart_zoom_level = max(1.1, min(3.0, float(args.smart_zoom_level)))
         render_sequence = [last_control_sequence]
@@ -490,6 +496,20 @@ def _run(args: argparse.Namespace) -> int:
             if outcome.error:
                 smart_zoom_manifest["error"] = outcome.error
             if outcome.state == "processed" and outcome.output_path:
+                if bool(getattr(args, "preserve_unzoomed", False)):
+                    try:
+                        unzoomed_path = preserve_unzoomed_recording(
+                            source_before_render,
+                            session_id,
+                        )
+                    except Exception as exc:
+                        warnings.append(
+                            "The original recording could not be retained for Smart Zoom removal."
+                        )
+                        logging.warning(
+                            "Could not preserve the unzoomed recording draft: %s",
+                            exc,
+                        )
                 publication_source = outcome.output_path
                 if source_before_render != raw_video_path:
                     try:
@@ -544,6 +564,7 @@ def _run(args: argparse.Namespace) -> int:
     try:
         published = publish_recording(publication_source, output_path, session)
     except Exception as exc:
+        discard_unzoomed_recording(unzoomed_path)
         logging.exception("Could not publish the completed recording: %s", exc)
         recovery_candidate = publication_source if os.path.isfile(publication_source) else raw_video_path
         recovery_path = os.path.abspath(recovery_candidate) if os.path.isfile(recovery_candidate) else ""
@@ -571,6 +592,8 @@ def _run(args: argparse.Namespace) -> int:
         warnings.append(published.warning)
     if warnings:
         payload["warning"] = " ".join(warnings)
+    if unzoomed_path and os.path.isfile(unzoomed_path):
+        payload["unzoomedPath"] = unzoomed_path
     _write_status_payload(
         args.status_file,
         last_control_sequence,
@@ -579,6 +602,7 @@ def _run(args: argparse.Namespace) -> int:
         progress=100 if smart_zoom_manifest.get("state") == "processed" else 0,
     )
     if not _write_result_payload(args.result_file, payload):
+        discard_unzoomed_recording(unzoomed_path)
         return 1
 
     if published.manifest_path:
@@ -622,6 +646,11 @@ def main() -> int:
         type=float,
         default=1.5,
         help="Smart Zoom scale (1.1 to 3.0)",
+    )
+    parser.add_argument(
+        "--preserve-unzoomed",
+        action="store_true",
+        help="Retain a private unzoomed draft for the post-capture remove action",
     )
     parser.add_argument(
         "--render-cursor",

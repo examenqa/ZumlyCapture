@@ -22,6 +22,7 @@ from zumly_capture.capture_ui import RegionSelector, WindowPickerDialog
 from zumly_capture.identity import FILE_PREFIX, PRODUCT_NAME
 from zumly_capture.preview_dialog import CapturePreviewDialog
 from zumly_capture.screenshot import foreground_window_handle, publish_screenshot
+from zumly_capture.session import discard_unzoomed_recording
 from zumly_capture.settings import load_settings, save_settings
 from zumly_capture.settings_dialog import CaptureSettingsDialog
 
@@ -290,7 +291,7 @@ class QtZumlyCaptureTray(QObject):
         record_region.triggered.connect(self._record_region)
         recording_menu.addAction(record_region)
 
-        self._cursor_zoom_action = QAction("Cursor Zoom", self)
+        self._cursor_zoom_action = QAction("Automatic Smart Zoom", self)
         self._cursor_zoom_action.setCheckable(True)
         self._cursor_zoom_action.setChecked(bool(self._cfg.get("smart_zoom_enabled", True)))
         self._cursor_zoom_action.triggered.connect(self._toggle_cursor_zoom)
@@ -359,7 +360,11 @@ class QtZumlyCaptureTray(QObject):
         if enabled:
             self._cfg["render_cursor"] = True
         self._cfg = save_settings(self._cfg)
-        self._notify("Cursor Zoom enabled" if enabled else "Cursor Zoom disabled")
+        self._notify(
+            "Automatic Smart Zoom enabled"
+            if enabled
+            else "Automatic Smart Zoom disabled"
+        )
 
     def _on_toggle(self, _checked: bool = False) -> None:
         if self._state == RecordingState.PROCESSING:
@@ -486,16 +491,23 @@ class QtZumlyCaptureTray(QObject):
             logger.error("Could not reveal capture: %s", exc)
             self._notify("Could not show the last capture in its folder")
 
-    def _show_capture_preview(self, capture_path: str) -> None:
+    def _show_capture_preview(
+        self,
+        capture_path: str,
+        unzoomed_path: str = "",
+    ) -> None:
         if not bool(self._cfg.get("preview_after_capture", True)):
+            discard_unzoomed_recording(unzoomed_path)
             return
         if not capture_path or not os.path.isfile(capture_path):
+            discard_unzoomed_recording(unzoomed_path)
             return
         if self._preview_dialog is not None:
             self._preview_dialog.close()
         try:
-            preview = CapturePreviewDialog(capture_path)
+            preview = CapturePreviewDialog(capture_path, unzoomed_path=unzoomed_path)
         except Exception as exc:
+            discard_unzoomed_recording(unzoomed_path)
             logger.warning("Could not open capture preview: %s", exc)
             return
         self._preview_dialog = preview
@@ -719,6 +731,8 @@ class QtZumlyCaptureTray(QObject):
                 "--smart-zoom-level",
                 str(self._cfg.get("smart_zoom_level", 1.5)),
             ]
+            if bool(self._cfg.get("preview_after_capture", True)):
+                command.append("--preserve-unzoomed")
             if bool(self._cfg.get("render_cursor", False)):
                 command.append("--render-cursor")
             if bool(self._cfg.get("render_clicks", True)):
@@ -998,7 +1012,9 @@ class QtZumlyCaptureTray(QObject):
                 self._notify(f"Recording saved: {os.path.basename(media_path)}")
             QTimer.singleShot(
                 160,
-                lambda path=self._last_capture_path: self._show_capture_preview(path),
+                lambda path=self._last_capture_path, original=str(
+                    result.get("unzoomedPath", "") or ""
+                ): self._show_capture_preview(path, original),
             )
         else:
             error = str(result.get("error", "") or "Recording engine did not publish a video")

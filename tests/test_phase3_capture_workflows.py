@@ -5,9 +5,9 @@ from pathlib import Path
 
 import pytest
 from PIL import Image
-from PySide6.QtCore import QPoint
+from PySide6.QtCore import QPoint, QPointF
 from PySide6.QtGui import QColor, QImage
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QPushButton
 
 from zumly import main as capture_main
 from zumly.app import qt_tray
@@ -29,7 +29,12 @@ from zumly_capture import screenshot
 from zumly_capture import settings_dialog
 from zumly_capture.audio import _active_wall_segments, parse_dshow_audio_devices
 from zumly_capture.capture_ui import physical_selection_rect
-from zumly_capture.preview_dialog import Annotation, render_annotations
+from zumly_capture.preview_dialog import (
+    Annotation,
+    AnnotationCanvas,
+    CapturePreviewDialog,
+    render_annotations,
+)
 from zumly_capture.settings import load_settings, normalize_settings, save_settings
 from zumly_capture.settings_dialog import CaptureSettingsDialog
 from zumly_capture.wgc import NativeFrameBuffer
@@ -189,6 +194,84 @@ def test_annotation_renderer_composites_without_mutating_source() -> None:
 
     assert source.pixelColor(10, 10) == QColor("white")
     assert rendered.pixelColor(10, 10) != QColor("white")
+
+
+def test_arrow_annotation_uses_a_substantial_filled_head() -> None:
+    source = QImage(150, 100, QImage.Format.Format_ARGB32)
+    source.fill(QColor("white"))
+    arrow = Annotation(
+        kind="arrow",
+        start=QPointF(20, 50),
+        end=QPointF(125, 50),
+        color=QColor("#ff0000"),
+        width=5,
+    )
+
+    rendered = render_annotations(source, [arrow])
+
+    assert rendered.pixelColor(100, 44).red() > 220
+    assert rendered.pixelColor(100, 44).green() < 40
+
+
+def test_filled_arrow_does_not_fill_later_outline_shapes() -> None:
+    source = QImage(180, 120, QImage.Format.Format_ARGB32)
+    source.fill(QColor("white"))
+    annotations = [
+        Annotation(
+            "arrow",
+            QPointF(10, 100),
+            QPointF(70, 70),
+            QColor("#ff0000"),
+            5,
+        ),
+        Annotation(
+            "rectangle",
+            QPointF(90, 20),
+            QPointF(170, 90),
+            QColor("#0088ff"),
+            4,
+        ),
+    ]
+
+    rendered = render_annotations(source, annotations)
+
+    assert rendered.pixelColor(130, 55) == QColor("white")
+
+
+def test_text_annotation_is_entered_directly_on_the_canvas(tmp_path: Path) -> None:
+    _app = QApplication.instance() or QApplication([])
+    image_path = tmp_path / "canvas.png"
+    image = QImage(320, 180, QImage.Format.Format_ARGB32)
+    image.fill(QColor("white"))
+    assert image.save(str(image_path), "PNG")
+    canvas = AnnotationCanvas(str(image_path))
+    canvas.resize(640, 380)
+
+    canvas._begin_inline_text(QPointF(80, 60), QPointF(160, 130))
+    assert canvas._inline_editor is not None
+    canvas._inline_editor.setText("Direct canvas text")
+    canvas._inline_editor._finish(True)
+
+    assert canvas.annotations[-1].kind == "text"
+    assert canvas.annotations[-1].text == "Direct canvas text"
+    canvas.deleteLater()
+
+
+def test_preview_actions_have_one_save_and_no_redundant_open(tmp_path: Path) -> None:
+    _app = QApplication.instance() or QApplication([])
+    image_path = tmp_path / "preview.png"
+    image = QImage(320, 180, QImage.Format.Format_ARGB32)
+    image.fill(QColor("white"))
+    assert image.save(str(image_path), "PNG")
+
+    dialog = CapturePreviewDialog(str(image_path))
+    buttons = {button.text(): button for button in dialog.findChildren(QPushButton)}
+
+    assert "Save" in buttons
+    assert "Open" not in buttons
+    assert buttons["Show in folder"].isEnabled() is False
+    dialog.close()
+    dialog.deleteLater()
 
 
 def test_active_window_is_resolved_after_tray_menu_closes(monkeypatch) -> None:

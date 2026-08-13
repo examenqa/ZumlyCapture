@@ -8,7 +8,12 @@ from zumly.app.qt_tray import QtZumlyCaptureTray
 from zumly.app.session_timing import RecordingState
 from zumly.app.utils import ffmpeg_exe
 from zumly.main import _read_control_payload
-from zumly_capture.session import CaptureSession
+from zumly_capture import session as capture_session
+from zumly_capture.session import (
+    CaptureSession,
+    preserve_unzoomed_recording,
+    restore_unzoomed_recording,
+)
 from zumly_capture import smart_zoom
 from zumly_capture.smart_zoom import (
     build_click_filter_chain,
@@ -188,6 +193,41 @@ def test_capture_manifest_records_smart_zoom_result(tmp_path: Path) -> None:
 
     assert manifest["smartZoom"]["state"] == "processed"
     assert manifest["smartZoom"]["keyframes"] == [{"zoom": 1.5}]
+
+
+def test_automatic_smart_zoom_can_be_removed_as_one_effect(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    drafts = tmp_path / "private-drafts"
+    monkeypatch.setattr(capture_session, "capture_drafts_directory", lambda: drafts)
+    original = tmp_path / "original.mp4"
+    original.write_bytes(b"unzoomed recording")
+    published = tmp_path / "capture.mp4"
+    published.write_bytes(b"automatic smart zoom recording")
+    manifest = published.with_suffix(".zumly-capture.json")
+    manifest.write_text(
+        json.dumps(
+            {
+                "mediaPath": str(published),
+                "smartZoom": {
+                    "state": "processed",
+                    "keyframes": [{"zoom": 1.5}, {"zoom": 1.0}],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    draft = preserve_unzoomed_recording(original, "session-123")
+
+    warning = restore_unzoomed_recording(published, draft)
+
+    assert warning == ""
+    assert published.read_bytes() == b"unzoomed recording"
+    assert not Path(draft).exists()
+    updated = json.loads(manifest.read_text(encoding="utf-8"))
+    assert updated["smartZoom"]["state"] == "removed"
+    assert updated["smartZoom"]["keyframes"] == []
 
 
 def test_renderer_produces_playable_video_and_reports_progress(tmp_path: Path) -> None:

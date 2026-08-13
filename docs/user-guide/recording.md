@@ -1,67 +1,45 @@
-# Screen & Window Recording
+# Screen, Window, and Region Recording
 
-Zumly captures your screen or any individual window, then tracks your mouse and clicks so you can add zoom effects in the editor.
+Zumly Capture records a monitor, an application window, or a selected region.
+The resulting MP4 is saved directly; the full Zumly editor and manual timeline
+are intentionally not part of this application.
 
-!!! note "Startup splash"
-    Zumly shows a brief splash screen while the recorder, tray controls, and editor shell initialise. It closes automatically as soon as the main window is ready.
+## Starting and stopping
 
----
+Use the tray menu or the default global shortcuts:
 
-## Choosing a Source
+- `Ctrl+Alt+4`: record the configured monitor.
+- `Ctrl+Alt+5`: choose a window to record.
+- `Ctrl+Alt+6`: select a region to record.
+- `Ctrl+Alt+9`: pause or resume.
+- `Ctrl+Alt+0`: stop recording.
 
-Click **Select Source** in the sidebar to open the Source Picker. Two tabs let you choose what to capture:
+The shortcuts are configurable in Settings. A countdown runs before capture,
+and the tray plus recording border show whether recording is active or paused.
 
-| Tab | What it captures |
-| --- | ---------------- |
-| **Screens** | An entire monitor — useful for full-screen demos and walkthroughs |
-| **Windows** | A single application window — the recording stays isolated to that app, even if other windows overlap it |
+## Automatic Smart Zoom
 
-Each option shows a live thumbnail preview so you can confirm the right source before you start.
+Smart Zoom is an optional Settings toggle and is enabled by default. It is not
+a manual recording editor.
 
-!!! tip "Multiple monitors"
-    If you have more than one monitor, each one appears separately under the **Screens** tab. Pick the one you want.
+When enabled, Zumly Capture records click and cursor telemetry on the same
+pause-aware active-time clock as the video. After recording stops, every
+eligible click is analyzed and an automatic cursor-follow zoom plan is rendered
+through FFmpeg. The tray shows post-processing progress, and cancelling that
+step safely publishes the original unzoomed recording.
 
----
+When Smart Zoom is disabled, the app skips analysis and publishes the recording
+without the extra render.
 
-## Starting a Recording
+## Post-capture preview
 
-1. Select your source in the Source Picker
-2. Click the red **Start Recording** button
+The recording preview supports playback only. It has no annotation tools,
+timeline, or controls for adding, moving, or changing zooms.
 
-A **3-second countdown** (3, 2, 1) appears on the preview — this gives you time to switch to the app you're recording before the camera starts rolling.
+If Smart Zoom was successfully applied, the preview offers one reversible
+choice: **Remove automatic Smart Zoom**. Selecting it previews the original
+recording; pressing **Save** replaces the zoomed result with that complete
+unzoomed recording. Individual automatic zooms cannot be edited or removed.
 
-Once the countdown finishes:
-
-- The app minimizes to the **system tray**
-- A subtle **red border** pulses around the captured monitor so you know recording is active
-- Your mouse position and clicks are tracked automatically
-
-You can also start (and stop) recording from any app using the global hotkey **Ctrl+Shift+R**.
-
----
-
-## Live Zoom During Recording
-
-You don't have to wait until the edit stage to add zoom — you can zoom in and out in real time while you're recording:
-
-| Hotkey | Action |
-| ------ | ------ |
-| **Ctrl+Shift+=** | Zoom in at your current cursor position |
-| **Ctrl+Shift+-** | Zoom back out to full view |
-
-These hotkeys work from any application while Zumly is recording in the background.
-
----
-
-## Stopping a Recording
-
-Stop at any time using either method:
-
-- Press **Ctrl+Shift+R** (global hotkey — works from any app)
-- Right-click the **system tray icon** and choose **Stop Recording**
-
-The app comes back up and switches straight to the editor with your recording loaded and ready to work on.
-
-!!! note "Processing moment"
-    A brief processing overlay appears while the recording is being finalised. It disappears automatically when your video is ready to edit.
-
+After Save, **Show in folder** reveals the final MP4. **Copy** places the media
+file on the clipboard.

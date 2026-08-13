@@ -29,8 +29,11 @@ successful capture.
 
 Every successful screenshot or recording opens in a compact preview. Image
 previews include pen, highlighter, arrow, rectangle, text, color, undo, copy,
-and in-place save controls; video previews include playback, copy, open, and
-show-in-folder actions. Cursor-follow zoom is enabled by default and is also
+and one explicit Save action; text is entered directly on the canvas. Video
+previews are playback-only. When automatic Smart Zoom was rendered, the user
+may remove the entire effect before saving, but cannot place or edit individual
+zooms. Show in Folder becomes available after Save, and the redundant preview
+Open action is omitted. Automatic Smart Zoom is enabled by default and is also
 available as a quick toggle in the tray menu.
 
 Default global shortcuts use the `Ctrl+Alt+number` family:
