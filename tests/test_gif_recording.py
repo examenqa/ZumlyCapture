@@ -103,9 +103,10 @@ def test_gif_preview_uses_an_animation_and_can_remove_smart_zoom(tmp_path: Path)
 
     assert zoomed.read_bytes() == original_bytes
     assert not original_gif.exists()
-    assert not original_video.exists()
+    assert original_video.exists()
     assert dialog._saved is True
     dialog.close()
+    assert not original_video.exists()
     dialog.deleteLater()
 
 
@@ -134,16 +135,18 @@ def test_mp4_preview_routes_gif_choice_to_the_format_worker(tmp_path: Path) -> N
     video = tmp_path / "capture.mp4"
     video.write_bytes(b"preview video")
     dialog = CapturePreviewDialog(str(video), preferred_output_format="gif")
-    requested: list[tuple[str, str, str]] = []
+    requested: list[tuple[str, str, str, bool]] = []
     dialog._start_format_save = (  # type: ignore[method-assign]
-        lambda source, output, output_format: requested.append(
-            (source, output, output_format)
+        lambda source, output, output_format, remove_zoom=False: requested.append(
+            (source, output, output_format, remove_zoom)
         )
     )
 
     dialog._save_video()
 
-    assert requested == [(str(video.resolve()), str(tmp_path / "capture.gif"), "gif")]
+    assert requested == [
+        (str(video.resolve()), str(tmp_path / "capture.gif"), "gif", False)
+    ]
     dialog.close()
     dialog.deleteLater()
 
@@ -185,10 +188,146 @@ def test_gif_preview_can_save_as_mp4_from_its_private_source(tmp_path: Path) -> 
     expected = tmp_path / "capture.mp4"
     assert saved_paths == [str(expected.resolve())]
     assert expected.read_bytes() == b"processed MP4 with audio"
-    assert not gif.exists()
-    assert not source.exists()
+    assert gif.exists()
+    assert source.exists()
     assert dialog._saved is True
+    assert dialog._player is not None
+    assert dialog._save_button is not None and dialog._save_button.isEnabled()
+
+    assert dialog._format_combo is not None
+    dialog._format_combo.setCurrentIndex(dialog._format_combo.findData("gif"))
+    dialog._save_video()
+    assert dialog.capture_path == str(gif.resolve())
+    assert dialog._gif_movie is not None
+    assert expected.exists()
+
+    dialog._format_combo.setCurrentIndex(dialog._format_combo.findData("mp4"))
+    dialog._save_video()
+    assert dialog.capture_path == str(expected.resolve())
+    assert dialog._player is not None
+    assert gif.exists()
     dialog.close()
+    assert not source.exists()
+    assert gif.exists()
+    assert expected.exists()
+    dialog.deleteLater()
+
+
+def test_mp4_preview_can_save_gif_and_switch_back_without_deleting_either(
+    tmp_path: Path,
+) -> None:
+    _app = QApplication.instance() or QApplication([])
+    mp4 = tmp_path / "capture.mp4"
+    subprocess.run(
+        [
+            ffmpeg_exe(),
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=320x180:rate=20:duration=0.25",
+            "-pix_fmt",
+            "yuv420p",
+            str(mp4),
+        ],
+        check=True,
+    )
+    dialog = CapturePreviewDialog(
+        str(mp4),
+        preferred_output_format="gif",
+    )
+    loop = QEventLoop()
+    dialog.saved.connect(lambda _path: loop.quit())
+
+    dialog._save_video()
+    QTimer.singleShot(5000, loop.quit)
+    loop.exec()
+
+    gif = tmp_path / "capture.gif"
+    assert gif.exists()
+    assert mp4.exists()
+    assert dialog.capture_path == str(gif.resolve())
+    assert dialog._gif_movie is not None
+    assert dialog._save_button is not None and dialog._save_button.isEnabled()
+
+    assert dialog._format_combo is not None
+    dialog._format_combo.setCurrentIndex(dialog._format_combo.findData("mp4"))
+    dialog._save_video()
+    assert dialog.capture_path == str(mp4.resolve())
+    assert dialog._player is not None
+    assert gif.exists()
+    assert mp4.exists()
+    dialog.close()
+    assert gif.exists()
+    assert mp4.exists()
+    dialog.deleteLater()
+
+
+def test_removed_zoom_source_survives_repeated_saves_until_preview_closes(
+    tmp_path: Path,
+) -> None:
+    _app = QApplication.instance() or QApplication([])
+    zoomed = tmp_path / "capture.mp4"
+    original = tmp_path / "private-original.mp4"
+    for path, color in ((zoomed, "red"), (original, "blue")):
+        subprocess.run(
+            [
+                ffmpeg_exe(),
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                f"color=c={color}:s=320x180:r=20:d=0.25",
+                "-pix_fmt",
+                "yuv420p",
+                str(path),
+            ],
+            check=True,
+        )
+    dialog = CapturePreviewDialog(
+        str(zoomed),
+        unzoomed_path=str(original),
+        preferred_output_format="gif",
+    )
+    assert dialog._remove_zoom is not None
+    dialog._remove_zoom.setChecked(True)
+    first_save = QEventLoop()
+    dialog.saved.connect(lambda _path: first_save.quit())
+
+    dialog._save_video()
+    QTimer.singleShot(5000, first_save.quit)
+    first_save.exec()
+
+    gif = tmp_path / "capture.gif"
+    assert gif.exists()
+    assert zoomed.exists()
+    assert original.exists()
+
+    assert dialog._format_combo is not None
+    dialog._format_combo.setCurrentIndex(dialog._format_combo.findData("mp4"))
+    second_save = QEventLoop()
+    dialog.saved.connect(lambda _path: second_save.quit())
+    dialog._save_video()
+    QTimer.singleShot(5000, second_save.quit)
+    second_save.exec()
+
+    unzoomed_mp4 = tmp_path / "capture_1.mp4"
+    assert unzoomed_mp4.exists()
+    assert gif.exists()
+    assert zoomed.exists()
+    assert original.exists()
+
+    dialog.close()
+    assert not zoomed.exists()
+    assert not original.exists()
+    assert gif.exists()
+    assert unzoomed_mp4.exists()
     dialog.deleteLater()
 
 

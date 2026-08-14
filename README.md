@@ -31,11 +31,13 @@ Every successful screenshot or recording opens in a compact preview. Image
 previews include pen, highlighter, arrow, rectangle, text, color, undo, copy,
 and one explicit Save action; text is entered directly on the canvas. Recording
 previews remain editing-free but include a Save as selector for MP4 or animated
-GIF. When automatic Smart Zoom was rendered, the user may remove the entire
-effect before saving, but cannot place or edit individual zooms. Show in Folder
-becomes available after Save, and the redundant preview Open action is omitted.
-Automatic Smart Zoom is enabled by default and is also available as a quick
-toggle in the tray menu.
+GIF. The preview retains its canonical MP4 source until it closes, so both
+formats can be saved and previewed during the same session without deleting the
+other output. When automatic Smart Zoom was rendered, the user may remove the
+entire effect before saving, but cannot place or edit individual zooms. Show in
+Folder becomes available after Save, and the redundant preview Open action is
+omitted. Automatic Smart Zoom is enabled by default and is also available as a
+quick toggle in the tray menu.
 
 Default global shortcuts use the `Ctrl+Alt+number` family:
 
