@@ -95,4 +95,8 @@ The resulting application directory is `dist/zumly-capture`. The Inno Setup
 definition in `zumly_capture_setup.iss` uses an installer identity distinct
 from Zumly, allowing both applications to coexist.
 
+Every push to `main` runs the Windows test and packaging workflow, then updates
+the rolling `continuous` prerelease with a fresh `ZumlyCaptureSetup.exe` and
+SHA-256 checksum. Numbered releases such as `v0.5.5` remain immutable.
+
 See [NOTICE.md](NOTICE.md) for derivation and attribution notes.

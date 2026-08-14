@@ -27,4 +27,4 @@ def test_installer_identity_is_a_valid_uuid() -> None:
 
 
 def test_standalone_version_starts_a_fresh_release_line() -> None:
-    assert __version__ == "0.5.4"
+    assert __version__ == "0.5.5"

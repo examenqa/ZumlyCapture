@@ -1,0 +1,106 @@
+name: Continuous Windows release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: continuous-windows-release
+  cancel-in-progress: false
+
+jobs:
+  build-test-release:
+    runs-on: windows-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements*.txt
+
+      - name: Install build dependencies
+        run: python -m pip install -r requirements-dev.txt
+
+      - name: Run tests
+        run: python -m pytest -q
+
+      - name: Build application
+        run: python -m PyInstaller --noconfirm zumly_capture.spec
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path -LiteralPath $iscc)) {
+            throw "Inno Setup compiler was not found at $iscc"
+          }
+          & $iscc "zumly_capture_setup.iss"
+          if ($LASTEXITCODE -ne 0) {
+            throw "Inno Setup failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Create checksum
+        shell: pwsh
+        run: |
+          $installer = "dist\ZumlyCaptureSetup.exe"
+          $hash = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash *ZumlyCaptureSetup.exe" | Set-Content -Path "$installer.sha256" -Encoding ascii
+
+      - name: Update continuous prerelease
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "continuous"
+          $shortSha = $env:GITHUB_SHA.Substring(0, 7)
+          $notesPath = Join-Path $env:RUNNER_TEMP "continuous-release-notes.md"
+          @"
+          Automated Windows build from the latest push to `main`.
+
+          - Commit: [$shortSha](https://github.com/$env:GITHUB_REPOSITORY/commit/$env:GITHUB_SHA)
+          - Workflow: [build run](https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID)
+          - The installer is not code-signed, so Windows may display a SmartScreen warning.
+
+          Verify the download with `ZumlyCaptureSetup.exe.sha256`.
+          "@ | Set-Content -Path $notesPath -Encoding utf8
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag --force $tag $env:GITHUB_SHA
+          git push origin "refs/tags/$tag" --force
+
+          gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release edit $tag `
+              --repo $env:GITHUB_REPOSITORY `
+              --title "Continuous Windows build ($shortSha)" `
+              --notes-file $notesPath `
+              --prerelease
+          } else {
+            gh release create $tag `
+              --repo $env:GITHUB_REPOSITORY `
+              --title "Continuous Windows build ($shortSha)" `
+              --notes-file $notesPath `
+              --prerelease
+          }
+
+          gh release upload $tag `
+            "dist\ZumlyCaptureSetup.exe" `
+            "dist\ZumlyCaptureSetup.exe.sha256" `
+            --repo $env:GITHUB_REPOSITORY `
+            --clobber
