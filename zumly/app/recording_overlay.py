@@ -20,20 +20,29 @@ WDA_EXCLUDEFROMCAPTURE = 0x00000011
 WM_PAINT = 0x000F
 WM_DESTROY = 0x0002
 WM_QUIT = 0x0012
-TRANSPARENT = 1
-DT_LEFT = 0x00000000
-DT_CENTER = 0x00000001
-DT_VCENTER = 0x00000004
-DT_SINGLELINE = 0x00000020
-DT_END_ELLIPSIS = 0x00008000
 SW_SHOWNOACTIVATE = 4
 HWND_TOPMOST = -1
 SWP_NOSIZE = 0x0001
 SWP_NOMOVE = 0x0002
 SWP_NOACTIVATE = 0x0010
+NULL_PEN = 8
 BASE_DPI = 96.0
-BASE_WIDTH = 168
-BASE_HEIGHT = 34
+
+# Hallmark · component: recording status badge · genre: modern-minimal · theme: Cobalt
+# Pre-emit critique: P5 H5 E5 S5 R5 V4
+BASE_WIDTH = 24
+BASE_HEIGHT = 24
+TOP_OFFSET = 16
+OUTER_CIRCLE = (1, 1, 23, 23)
+RING_CIRCLE = (3, 3, 21, 21)
+DOT_CIRCLE = (7, 7, 17, 17)
+
+# COLORREF values are BGR. The cool neutral edge keeps the near-white ring
+# visible against both light and dark content without growing the badge.
+EDGE_COLOR = 0x002A170F       # RGB(15, 23, 42) / #0F172A
+RING_COLOR = 0x00FCFAF8       # RGB(248, 250, 252) / #F8FAFC
+RECORDING_COLOR = 0x004444EF  # RGB(239, 68, 68) / #EF4444
+PAUSED_COLOR = 0x000B9EF5     # RGB(245, 158, 11) / #F59E0B
 
 class WNDCLASSEX(ctypes.Structure):
     _fields_ = [("cbSize", wintypes.UINT),
@@ -93,13 +102,6 @@ user32.UnregisterClassW.restype = wintypes.BOOL
 
 
 # Define GDI argtypes
-gdi32.CreateFontW.argtypes = [
-    ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
-    wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD,
-    wintypes.DWORD, wintypes.DWORD, wintypes.DWORD, wintypes.DWORD,
-    wintypes.LPCWSTR
-]
-gdi32.CreateFontW.restype = wintypes.HANDLE
 gdi32.GetStockObject.argtypes = [ctypes.c_int]
 gdi32.GetStockObject.restype = wintypes.HANDLE
 gdi32.CreateSolidBrush.argtypes = [wintypes.COLORREF]
@@ -108,18 +110,7 @@ gdi32.SelectObject.argtypes = [wintypes.HDC, wintypes.HANDLE]
 gdi32.SelectObject.restype = wintypes.HANDLE
 gdi32.DeleteObject.argtypes = [wintypes.HANDLE]
 gdi32.DeleteObject.restype = wintypes.BOOL
-gdi32.RoundRect.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
 gdi32.Ellipse.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
-gdi32.SetTextColor.argtypes = [wintypes.HDC, wintypes.COLORREF]
-gdi32.SetBkMode.argtypes = [wintypes.HDC, ctypes.c_int]
-user32.DrawTextW.argtypes = [
-    wintypes.HDC,
-    wintypes.LPCWSTR,
-    ctypes.c_int,
-    ctypes.POINTER(wintypes.RECT),
-    wintypes.UINT,
-]
-user32.DrawTextW.restype = ctypes.c_int
 
 
 def _get_system_scale_factor() -> float:
@@ -134,7 +125,7 @@ def _get_system_scale_factor() -> float:
 
 
 class RecordingOverlay:
-    """A pure Win32 frameless, transparent window excluded from capture."""
+    """A compact Win32 recording-status dot excluded from capture."""
     
     def __init__(self, monitor_rect: dict):
         self.monitor_rect = monitor_rect
@@ -171,13 +162,12 @@ class RecordingOverlay:
     def _px(self, value: float) -> int:
         return max(1, int(round(value * self.scale_factor)))
 
-    def _rect(self, left: float, top: float, right: float, bottom: float) -> wintypes.RECT:
-        return wintypes.RECT(
-            self._px(left),
-            self._px(top),
-            self._px(right),
-            self._px(bottom),
-        )
+    def _draw_circle(self, hdc, bounds: tuple[int, int, int, int], color: int) -> None:
+        brush = gdi32.CreateSolidBrush(color)
+        old_brush = gdi32.SelectObject(hdc, brush)
+        gdi32.Ellipse(hdc, *(self._px(value) for value in bounds))
+        gdi32.SelectObject(hdc, old_brush)
+        gdi32.DeleteObject(brush)
 
     def _wndproc(self, hwnd, msg, wparam, lparam):
         if msg == WM_PAINT:
@@ -187,53 +177,17 @@ class RecordingOverlay:
             hdc = user32.BeginPaint(hwnd, ctypes.byref(ps))
 
             # Remove black borders globally
-            hpen_null = gdi32.GetStockObject(5) # NULL_PEN
+            hpen_null = gdi32.GetStockObject(NULL_PEN)
             old_pen = gdi32.SelectObject(hdc, hpen_null)
 
-            # Draw dark gray pill background
-            hbrush_bg = gdi32.CreateSolidBrush(0x001C1C1C) # RGB(28,28,28) -> BGR(0x1c1c1c)
-            old_brush = gdi32.SelectObject(hdc, hbrush_bg)
-            gdi32.RoundRect(
+            # Three concentric circles remain legible on any captured content.
+            self._draw_circle(hdc, OUTER_CIRCLE, EDGE_COLOR)
+            self._draw_circle(hdc, RING_CIRCLE, RING_COLOR)
+            self._draw_circle(
                 hdc,
-                0,
-                0,
-                self.width,
-                self.height,
-                self._px(17),
-                self._px(17),
+                DOT_CIRCLE,
+                PAUSED_COLOR if paused else RECORDING_COLOR,
             )
-            gdi32.SelectObject(hdc, old_brush)
-            gdi32.DeleteObject(hbrush_bg)
-
-            # Crimson while recording, amber while paused (COLORREF is BGR).
-            indicator_color = 0x0000A5FF if paused else 0x002311E8
-            hbrush_indicator = gdi32.CreateSolidBrush(indicator_color)
-            old_brush = gdi32.SelectObject(hdc, hbrush_indicator)
-            gdi32.Ellipse(hdc, self._px(14), self._px(9), self._px(28), self._px(23))
-            gdi32.SelectObject(hdc, old_brush)
-            gdi32.DeleteObject(hbrush_indicator)
-
-            # Draw high-contrast recording text.
-            text = "Paused" if paused else "Recording"
-            gdi32.SetBkMode(hdc, TRANSPARENT)
-            
-            # Create Segoe UI at the scaled 10pt logical size
-            # FW_NORMAL = 400, DEFAULT_CHARSET = 1, CLEARTYPE_QUALITY = 5
-            font_height = -self._px(14)
-            hfont = gdi32.CreateFontW(font_height, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 5, 0, "Segoe UI")
-            old_font = gdi32.SelectObject(hdc, hfont)
-
-            flags = DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS
-            shadow_rect = self._rect(34, 1, 164, 34)
-            gdi32.SetTextColor(hdc, 0x00000000)
-            user32.DrawTextW(hdc, text, -1, ctypes.byref(shadow_rect), flags)
-
-            rect = self._rect(33, 0, 163, 34)
-            gdi32.SetTextColor(hdc, 0x00FFFFFF)
-            user32.DrawTextW(hdc, text, -1, ctypes.byref(rect), flags)
-
-            gdi32.SelectObject(hdc, old_font)
-            gdi32.DeleteObject(hfont)
             gdi32.SelectObject(hdc, old_pen)
 
             user32.EndPaint(hwnd, ctypes.byref(ps))
@@ -266,7 +220,7 @@ class RecordingOverlay:
         width = self.width
         height = self.height
         x = self.monitor_rect.get("left", 0) + (self.monitor_rect.get("width", 1920) - width) // 2
-        y = self.monitor_rect.get("top", 0) + self._px(20)
+        y = self.monitor_rect.get("top", 0) + self._px(TOP_OFFSET)
 
         self.hwnd = user32.CreateWindowExW(
             WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW,

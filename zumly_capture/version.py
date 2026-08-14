@@ -1,3 +1,3 @@
 """Semantic version for the standalone Zumly Capture release lifecycle."""
 
-__version__ = "0.5.3"
+__version__ = "0.5.4"
