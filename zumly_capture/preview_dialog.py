@@ -31,6 +31,7 @@ from PySide6.QtGui import (
     QPainter,
     QPen,
     QPolygonF,
+    QShortcut,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -73,6 +74,37 @@ class Annotation:
     color: QColor
     width: float
     text: str = ""
+
+
+DEFAULT_ANNOTATION_TOOL = "arrow"
+DEFAULT_ANNOTATION_WIDTH = 5.0
+ARROW_ANNOTATION_WIDTH = 8.0
+MASK_ANNOTATION_WIDTH = 26.0
+
+
+class _RecordingFormatComboBox(QComboBox):
+    """Format selector with a consistently visible, platform-independent chevron."""
+
+    def paintEvent(self, event) -> None:  # noqa: N802 - Qt virtual method name
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        color = QColor("#718096") if not self.isEnabled() else QColor("#9ecbff")
+        pen = QPen(color, 2.0, Qt.PenStyle.SolidLine)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(pen)
+        center_x = self.width() - 16.0
+        center_y = self.height() / 2.0
+        painter.drawPolyline(
+            QPolygonF(
+                [
+                    QPointF(center_x - 4.0, center_y - 2.0),
+                    QPointF(center_x, center_y + 2.0),
+                    QPointF(center_x + 4.0, center_y - 2.0),
+                ]
+            )
+        )
 
 
 class _GifPreviewWorker(QObject):
@@ -194,7 +226,7 @@ def _draw_annotation(painter: QPainter, annotation: Annotation) -> None:
         )
     )
     painter.setBrush(Qt.BrushStyle.NoBrush)
-    if annotation.kind in {"pen", "highlight"}:
+    if annotation.kind in {"pen", "highlight", "mask"}:
         painter.drawLine(annotation.start, annotation.end)
     elif annotation.kind == "rectangle":
         painter.drawRect(QRectF(annotation.start, annotation.end).normalized())
@@ -461,7 +493,9 @@ class AnnotationCanvas(QWidget):
         if self._image.isNull():
             raise ValueError(f"Could not load screenshot: {path}")
         self._annotations: list[Annotation] = []
-        self._tool = "pen"
+        self._undo_boundaries: list[int] = []
+        self._action_start_index: int | None = None
+        self._tool = DEFAULT_ANNOTATION_TOOL
         self._color = QColor("#ff4d67")
         self._start: QPointF | None = None
         self._preview: Annotation | None = None
@@ -483,10 +517,12 @@ class AnnotationCanvas(QWidget):
             self._color = QColor(color)
 
     def undo(self) -> None:
-        if self._annotations:
-            self._annotations.pop()
-            self.changed.emit()
-            self.update()
+        if not self._undo_boundaries:
+            return
+        boundary = self._undo_boundaries.pop()
+        del self._annotations[boundary:]
+        self.changed.emit()
+        self.update()
 
     def rendered_image(self) -> QImage:
         return render_annotations(self._image, self._annotations)
@@ -523,9 +559,11 @@ class AnnotationCanvas(QWidget):
     def _commit_inline_text(self, text: str) -> None:
         origin = self._inline_origin
         if origin is not None and text.strip():
+            boundary = len(self._annotations)
             self._annotations.append(
                 Annotation("text", origin, origin, self._color, 4.0, text.strip())
             )
+            self._undo_boundaries.append(boundary)
             self.changed.emit()
             self.update()
         self._clear_inline_text()
@@ -583,13 +621,19 @@ class AnnotationCanvas(QWidget):
         if self._tool == "text":
             self._begin_inline_text(point, event.position())
             return
+        self._action_start_index = len(self._annotations)
         self._start = point
+        width = DEFAULT_ANNOTATION_WIDTH
+        if self._tool == "arrow":
+            width = ARROW_ANNOTATION_WIDTH
+        elif self._tool == "mask":
+            width = MASK_ANNOTATION_WIDTH
         self._preview = Annotation(
             self._tool,
             point,
             point,
             self._color,
-            18.0 if self._tool == "highlight" else 5.0,
+            width,
         )
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
@@ -598,7 +642,7 @@ class AnnotationCanvas(QWidget):
         point = self._to_image(event.position())
         if point is None:
             return
-        if self._tool in {"pen", "highlight"}:
+        if self._tool in {"pen", "mask"}:
             self._annotations.append(
                 Annotation(
                     self._tool,
@@ -618,11 +662,15 @@ class AnnotationCanvas(QWidget):
         point = self._to_image(event.position())
         if point is not None:
             self._preview.end = point
-        if self._tool not in {"pen", "highlight"}:
+        if self._tool not in {"pen", "mask"}:
             self._annotations.append(self._preview)
+        boundary = self._action_start_index
         self._start = None
         self._preview = None
-        self.changed.emit()
+        self._action_start_index = None
+        if boundary is not None and len(self._annotations) > boundary:
+            self._undo_boundaries.append(boundary)
+            self.changed.emit()
         self.update()
 
 
@@ -687,11 +735,14 @@ class CapturePreviewDialog(QDialog):
         self._reveal_button: QPushButton | None = None
         self._save_button: QPushButton | None = None
         self._format_combo: QComboBox | None = None
+        self._undo_shortcut: QShortcut | None = None
         self._recording_shell: QWidget | None = None
         self._recording_layout: QVBoxLayout | None = None
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.setWindowTitle(f"Preview · {Path(self.capture_path).name}")
         self.resize(980, 690)
+        # Hallmark · component: preview controls · modern-minimal / Cobalt
+        # Pre-emit critique: P5 H5 E5 S5 R5 V4
         self.setStyleSheet(
             """
             QDialog { background: #111827; color: #edf4ff; }
@@ -704,12 +755,49 @@ class CapturePreviewDialog(QDialog):
             QToolButton:checked { background: #2f7fca; border-color: #70b7ff; }
             QPushButton:disabled { color: #718096; background: #1b2637; border-color: #2c3a4d; }
             QCheckBox { color: #d6e4f5; spacing: 8px; padding: 5px; }
+            QCheckBox#removeSmartZoom { spacing: 10px; padding: 6px 4px; }
+            QCheckBox#removeSmartZoom::indicator {
+                width: 18px; height: 18px; background: #1d2a3c;
+                border: 2px solid #62aaf0; border-radius: 5px;
+            }
+            QCheckBox#removeSmartZoom::indicator:hover {
+                background: #263449; border-color: #70b7ff;
+            }
+            QCheckBox#removeSmartZoom::indicator:checked {
+                background: #2f7fca; border-color: #70b7ff;
+            }
+            QCheckBox#removeSmartZoom::indicator:checked:hover {
+                background: #356da8; border-color: #9ecbff;
+            }
+            QCheckBox#removeSmartZoom::indicator:pressed { background: #356da8; }
+            QCheckBox#removeSmartZoom:focus {
+                color: #f6f9ff; background: #1d2a3c; border-radius: 5px;
+            }
+            QCheckBox#removeSmartZoom::indicator:disabled {
+                background: #1b2637; border-color: #40536c;
+            }
             QComboBox {
                 background: #1d2a3c; color: #f6f9ff; border: 1px solid #40536c;
                 border-radius: 7px; padding: 7px 10px; min-height: 22px;
                 min-width: 116px;
             }
             QComboBox:hover { border-color: #62aaf0; }
+            QComboBox#recordingFormat { padding: 7px 40px 7px 10px; min-width: 116px; }
+            QComboBox#recordingFormat::drop-down {
+                subcontrol-origin: padding; subcontrol-position: top right;
+                width: 32px; background: #263449; border-left: 1px solid #40536c;
+                border-top-right-radius: 6px; border-bottom-right-radius: 6px;
+            }
+            QComboBox#recordingFormat::drop-down:hover,
+            QComboBox#recordingFormat::drop-down:on { background: #356da8; }
+            QComboBox#recordingFormat::down-arrow { image: none; width: 0; height: 0; }
+            QComboBox#recordingFormat:focus { border-color: #70b7ff; }
+            QComboBox#recordingFormat:disabled {
+                color: #718096; background: #1b2637; border-color: #2c3a4d;
+            }
+            QComboBox#recordingFormat::drop-down:disabled {
+                background: #1b2637; border-left-color: #2c3a4d;
+            }
             QComboBox QAbstractItemView {
                 background: #1d2a3c; color: #f6f9ff; selection-background-color: #356da8;
             }
@@ -805,7 +893,7 @@ class CapturePreviewDialog(QDialog):
         group.setExclusive(True)
         for label, tool in (
             ("Pen", "pen"),
-            ("Highlight", "highlight"),
+            ("Mask", "mask"),
             ("Arrow", "arrow"),
             ("Rectangle", "rectangle"),
             ("Text", "text"),
@@ -813,7 +901,7 @@ class CapturePreviewDialog(QDialog):
             button = QToolButton()
             button.setText(label)
             button.setCheckable(True)
-            button.setChecked(tool == "pen")
+            button.setChecked(tool == DEFAULT_ANNOTATION_TOOL)
             group.addButton(button)
             button.clicked.connect(lambda _checked=False, value=tool: self._canvas.set_tool(value))
             toolbar.addWidget(button)
@@ -821,8 +909,12 @@ class CapturePreviewDialog(QDialog):
         color.clicked.connect(self._choose_color)
         toolbar.addWidget(color)
         undo = QPushButton("Undo")
+        undo.setToolTip("Undo (Ctrl+Z)")
         undo.clicked.connect(self._canvas.undo)
         toolbar.addWidget(undo)
+        self._undo_shortcut = QShortcut(QKeySequence.StandardKey.Undo, self)
+        self._undo_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+        self._undo_shortcut.activated.connect(self._canvas.undo)
         toolbar.addStretch(1)
         hint = QLabel("Text: click the canvas and type")
         hint.setStyleSheet("color: #91a6bd; padding-right: 6px;")
@@ -906,6 +998,7 @@ class CapturePreviewDialog(QDialog):
         zoom_row.addWidget(self._zoom_status)
         zoom_row.addStretch(1)
         self._remove_zoom = QCheckBox("Remove automatic Smart Zoom")
+        self._remove_zoom.setObjectName("removeSmartZoom")
         self._remove_zoom.toggled.connect(self._preview_zoom_choice)
         zoom_row.addWidget(self._remove_zoom)
         root.addLayout(zoom_row)
@@ -924,7 +1017,7 @@ class CapturePreviewDialog(QDialog):
             format_label = QLabel("Save as:")
             format_label.setStyleSheet("color: #d6e4f5; font-weight: 650;")
             row.addWidget(format_label)
-            self._format_combo = QComboBox()
+            self._format_combo = _RecordingFormatComboBox()
             self._format_combo.setObjectName("recordingFormat")
             self._format_combo.addItem("MP4 video", "mp4")
             self._format_combo.addItem("Animated GIF", "gif")

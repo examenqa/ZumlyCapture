@@ -1,6 +1,13 @@
+# Third-party notices
+
+## FollowCursor
+
+Portions of Zumly and Zumly Capture are derived from FollowCursor:
+https://github.com/sabbour/followcursor
+
 MIT License
 
-Copyright (c) 2026 Examen QA
+Copyright (c) 2026 Ahmed Sabbour
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

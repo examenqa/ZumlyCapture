@@ -1,14 +1,15 @@
 # Attribution and derivation notice
 
-Zumly Capture is a separate application derived from selected components of
-the Zumly project. The retained capture, timing, Smart Zoom, rendering, and
-resource code remains copyright (c) 2026 Ahmed Sabbour and is distributed
-under the MIT License in [LICENSE](LICENSE).
+Zumly Capture is a streamlined edition of Zumly and contains original code
+and modifications developed for the Zumly project. Zumly was initially
+developed using portions of FollowCursor by Ahmed Sabbour.
 
-Zumly Capture has its own package name, application identifier, settings
-namespace, single-instance objects, executable name, installer identity, and
-release version. The original `C:\MyApps\Zumly` repository is reference-only
-and is not part of this repository's history.
+Portions of FollowCursor retained in this distribution are used under the MIT
+License and remain copyright (c) 2026 Ahmed Sabbour. The complete upstream
+notice is included in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+All other original Zumly and Zumly Capture code and modifications are
+copyright (c) 2026 Examen QA and are distributed under the MIT License in
+[LICENSE](LICENSE).
 
 Third-party packages and bundled assets retain their respective licenses.
-Release packaging must include any notices required by those dependencies.

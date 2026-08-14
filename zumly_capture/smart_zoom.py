@@ -12,6 +12,11 @@ from typing import Callable, Iterable, Optional
 from PIL import Image, ImageDraw
 
 from zumly.app.activity_analyzer import analyze_activity
+from zumly.app.cursor_animation import (
+    LEGACY_PRESS_HOLD_MS,
+    PRESS_SCALE,
+    RELEASE_DURATION_MS,
+)
 from zumly.app.icon_loader import get_resource_path
 from zumly.app.models import ClickEvent, MousePosition, ZoomKeyframe
 from zumly.app.utils import ffmpeg_exe
@@ -170,6 +175,32 @@ def build_cursor_axis_expression(
                 f"({values[index + 1]:.3f}-{values[index]:.3f})*{progress}"
             )
         expression = f"if(lt(t,{following_time:.6f}),{segment_value},{expression})"
+    return expression
+
+
+def build_cursor_click_scale_expression(
+    click_events: Iterable[ClickEvent],
+) -> str:
+    """Build the original Zumly hotspot-anchored cursor press animation."""
+    expression = "1.000000"
+    press_scale = float(PRESS_SCALE)
+    recovery = 1.0 - press_scale
+    hold_seconds = float(LEGACY_PRESS_HOLD_MS) / 1000.0
+    release_seconds = float(RELEASE_DURATION_MS) / 1000.0
+    for click in sorted(click_events, key=lambda event: float(event.timestamp)):
+        start = max(0.0, float(click.timestamp) / 1000.0)
+        hold_end = start + hold_seconds
+        end = hold_end + release_seconds
+        progress = f"clip((t-{hold_end:.6f})/{release_seconds:.6f},0,1)"
+        eased = f"(1-pow(1-{progress},3))"
+        local_scale = (
+            f"if(lt(t,{hold_end:.6f}),{press_scale:.6f},"
+            f"{press_scale:.6f}+{recovery:.6f}*{eased})"
+        )
+        expression = (
+            f"if(between(t,{start:.6f},{end:.6f}),"
+            f"{local_scale},{expression})"
+        )
     return expression
 
 
@@ -407,9 +438,20 @@ def _build_filter_graph(
         if not cursor_command_path:
             raise ValueError("Cursor rendering requires a command script")
         command_path = _escape_filter_path(cursor_command_path)
+        cursor_input = "1:v"
+        if click_events:
+            click_scale = build_cursor_click_scale_expression(click_events)
+            filters.append(
+                f"[1:v]format=rgba,"
+                f"scale=w='max(1,iw*({click_scale}))':"
+                f"h='max(1,ih*({click_scale}))':eval=frame,"
+                f"pad={CURSOR_WIDTH}:{CURSOR_HEIGHT}:0:0:color=black@0"
+                "[animatedcursor]"
+            )
+            cursor_input = "animatedcursor"
         filters.append(f"[{current}]sendcmd=f='{command_path}'[commanded]")
         filters.append(
-            "[commanded][1:v]overlay@cursor=x=0:y=0:"
+            f"[commanded][{cursor_input}]overlay@cursor=x=0:y=0:"
             "eval=frame:eof_action=repeat:shortest=1[decorated]"
         )
         current = "decorated"

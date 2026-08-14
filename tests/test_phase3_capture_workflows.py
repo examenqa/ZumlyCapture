@@ -8,12 +8,12 @@ from types import SimpleNamespace
 import pytest
 from PIL import Image
 from PySide6.QtCore import QPoint, QPointF, Qt
-from PySide6.QtGui import QColor, QImage
+from PySide6.QtGui import QColor, QImage, QKeySequence
 from PySide6.QtTest import QTest
-from PySide6.QtWidgets import QApplication, QLineEdit, QPushButton
+from PySide6.QtWidgets import QApplication, QLineEdit, QPushButton, QToolButton
 
 from zumly import main as capture_main
-from zumly.app import qt_tray, screen_recorder
+from zumly.app import qt_tray, recording_overlay, screen_recorder
 from zumly.app.qt_tray import (
     HOTKEY_PAUSE_ID,
     HOTKEY_RECORD_MONITOR_ID,
@@ -26,9 +26,10 @@ from zumly.app.qt_tray import (
     MOD_CONTROL,
     MOD_SHIFT,
     QtZumlyCaptureTray,
+    _HotkeyThread,
     _parse_hotkey,
 )
-from zumly_capture import screenshot, windows_shell
+from zumly_capture import preview_dialog, screenshot, windows_shell
 from zumly_capture import settings_dialog
 from zumly_capture.audio import _active_wall_segments, parse_dshow_audio_devices
 from zumly_capture.capture_ui import physical_selection_rect
@@ -46,6 +47,26 @@ from zumly_capture.settings import (
 )
 from zumly_capture.settings_dialog import CaptureSettingsDialog
 from zumly_capture.wgc import NativeFrameBuffer
+
+
+def test_recording_indicator_uses_smooth_premultiplied_alpha() -> None:
+    pixels = recording_overlay._render_indicator_pixels(24, 24, paused=False)
+    alpha = pixels[3::4]
+
+    assert len(pixels) == 24 * 24 * 4
+    assert min(alpha) == 0
+    assert max(alpha) == 255
+    assert any(0 < value < 255 for value in alpha)
+    assert pixels[(12 * 24 + 12) * 4 : (12 * 24 + 12) * 4 + 4] == bytes(
+        (68, 68, 239, 255)
+    )
+
+
+def test_recording_indicator_keeps_paused_state_color() -> None:
+    pixels = recording_overlay._render_indicator_pixels(24, 24, paused=True)
+    center = (12 * 24 + 12) * 4
+
+    assert pixels[center : center + 4] == bytes((11, 158, 245, 255))
 
 
 def test_settings_normalize_and_roundtrip(tmp_path: Path) -> None:
@@ -231,6 +252,74 @@ def test_hotkey_parser_supports_letters_and_function_keys() -> None:
     assert _parse_hotkey("Ctrl+Alt+1") == (MOD_CONTROL | 0x0001, ord("1"))
 
 
+def test_hotkey_thread_reports_registration_conflicts(monkeypatch) -> None:
+    unregistered: list[int] = []
+
+    class User32:
+        @staticmethod
+        def RegisterHotKey(_window, hotkey_id, _modifiers, _key) -> bool:
+            return hotkey_id != 1
+
+        @staticmethod
+        def GetMessageW(_message, _window, _minimum, _maximum) -> int:
+            return 0
+
+        @staticmethod
+        def UnregisterHotKey(_window, hotkey_id) -> None:
+            unregistered.append(hotkey_id)
+
+    class Kernel32:
+        @staticmethod
+        def GetCurrentThreadId() -> int:
+            return 42
+
+        @staticmethod
+        def GetLastError() -> int:
+            return qt_tray.ERROR_HOTKEY_ALREADY_REGISTERED
+
+    monkeypatch.setattr(
+        qt_tray.ctypes,
+        "windll",
+        SimpleNamespace(user32=User32(), kernel32=Kernel32()),
+    )
+    thread = _HotkeyThread(
+        lambda _hotkey_id: None,
+        {1: "Ctrl+Alt+1", 2: "Ctrl+Alt+2"},
+    )
+
+    thread.run()
+
+    assert thread.failures == (
+        ("Ctrl+Alt+1", "Already in use by another app"),
+    )
+    assert unregistered == [2]
+
+
+def test_tray_menu_lists_shortcut_registration_issues() -> None:
+    app = QApplication.instance() or QApplication([])
+    tray = QtZumlyCaptureTray(app)
+    tray._initialize_tray_ui()
+
+    tray._update_hotkey_status(
+        (
+            ("Ctrl+Alt+1", "Already in use by another app"),
+            ("Ctrl+Alt+5", "Could not be registered"),
+        )
+    )
+
+    assert tray._hotkey_status_menu is not None
+    assert tray._hotkey_status_menu.menuAction().isVisible() is True
+    assert tray._hotkey_status_menu.title() == "Shortcut issues (2)"
+    assert [action.text() for action in tray._hotkey_status_menu.actions()] == [
+        "Ctrl+Alt+1 — Already in use by another app",
+        "Ctrl+Alt+5 — Could not be registered",
+    ]
+
+    tray._update_hotkey_status(())
+    assert tray._hotkey_status_menu.menuAction().isVisible() is False
+    tray.deleteLater()
+
+
 def test_number_hotkeys_route_to_all_capture_actions() -> None:
     calls: list[str] = []
 
@@ -358,6 +447,23 @@ def test_filled_arrow_does_not_fill_later_outline_shapes() -> None:
     assert rendered.pixelColor(130, 55) == QColor("white")
 
 
+def test_mask_annotation_uses_an_opaque_thick_stroke() -> None:
+    source = QImage(140, 80, QImage.Format.Format_ARGB32)
+    source.fill(QColor("white"))
+    mask = Annotation(
+        "mask",
+        QPointF(20, 40),
+        QPointF(120, 40),
+        QColor("#ff0000"),
+        26,
+    )
+
+    rendered = render_annotations(source, [mask])
+
+    assert rendered.pixelColor(70, 40) == QColor("#ff0000")
+    assert rendered.pixelColor(70, 28).red() > 220
+
+
 def test_text_annotation_is_entered_directly_on_the_canvas(tmp_path: Path) -> None:
     _app = QApplication.instance() or QApplication([])
     image_path = tmp_path / "canvas.png"
@@ -382,7 +488,109 @@ def test_text_annotation_is_entered_directly_on_the_canvas(tmp_path: Path) -> No
 
     assert canvas.annotations[-1].kind == "text"
     assert canvas.annotations[-1].text == "Direct canvas text"
+    canvas.undo()
+    assert canvas.annotations == []
     canvas.deleteLater()
+
+
+def test_annotation_toolbar_defaults_to_wider_arrow_and_uses_mask(
+    tmp_path: Path,
+) -> None:
+    _app = QApplication.instance() or QApplication([])
+    image_path = tmp_path / "annotation-tools.png"
+    image = QImage(320, 180, QImage.Format.Format_ARGB32)
+    image.fill(QColor("white"))
+    assert image.save(str(image_path), "PNG")
+
+    dialog = CapturePreviewDialog(str(image_path))
+    tools = {button.text(): button for button in dialog.findChildren(QToolButton)}
+
+    assert "Mask" in tools
+    assert "Highlight" not in tools
+    assert tools["Arrow"].isChecked() is True
+    assert tools["Pen"].isChecked() is False
+    assert dialog._canvas._tool == "arrow"
+
+    dialog._canvas.resize(640, 380)
+    QTest.mousePress(
+        dialog._canvas,
+        Qt.MouseButton.LeftButton,
+        pos=QPoint(100, 100),
+    )
+    assert dialog._canvas._preview is not None
+    assert dialog._canvas._preview.width == 8.0
+    QTest.mouseRelease(
+        dialog._canvas,
+        Qt.MouseButton.LeftButton,
+        pos=QPoint(280, 100),
+    )
+
+    tools["Mask"].click()
+    QTest.mousePress(
+        dialog._canvas,
+        Qt.MouseButton.LeftButton,
+        pos=QPoint(100, 140),
+    )
+    assert dialog._canvas._preview is not None
+    assert dialog._canvas._preview.kind == "mask"
+    assert dialog._canvas._preview.width == 26.0
+    QTest.mouseRelease(
+        dialog._canvas,
+        Qt.MouseButton.LeftButton,
+        pos=QPoint(280, 140),
+    )
+    dialog.close()
+    dialog.deleteLater()
+
+
+def test_undo_removes_whole_strokes_including_the_initial_action(
+    tmp_path: Path,
+) -> None:
+    _app = QApplication.instance() or QApplication([])
+    image_path = tmp_path / "undo-actions.png"
+    image = QImage(320, 180, QImage.Format.Format_ARGB32)
+    image.fill(QColor("white"))
+    assert image.save(str(image_path), "PNG")
+    canvas = AnnotationCanvas(str(image_path))
+    canvas.resize(640, 380)
+    canvas.set_tool("mask")
+
+    for y in (70, 110):
+        QTest.mousePress(canvas, Qt.MouseButton.LeftButton, pos=QPoint(80, y))
+        QTest.mouseMove(canvas, QPoint(180, y))
+        QTest.mouseMove(canvas, QPoint(280, y))
+        QTest.mouseRelease(canvas, Qt.MouseButton.LeftButton, pos=QPoint(300, y))
+
+    assert len(canvas.annotations) == 4
+    canvas.undo()
+    assert len(canvas.annotations) == 2
+    canvas.undo()
+    assert canvas.annotations == []
+    canvas.deleteLater()
+
+
+def test_undo_button_uses_ctrl_z_and_removes_the_first_arrow(tmp_path: Path) -> None:
+    _app = QApplication.instance() or QApplication([])
+    image_path = tmp_path / "undo-shortcut.png"
+    image = QImage(320, 180, QImage.Format.Format_ARGB32)
+    image.fill(QColor("white"))
+    assert image.save(str(image_path), "PNG")
+    dialog = CapturePreviewDialog(str(image_path))
+    dialog.resize(760, 520)
+    dialog.show()
+    QApplication.processEvents()
+
+    assert dialog._undo_shortcut is not None
+    assert dialog._undo_shortcut.key() == QKeySequence(QKeySequence.StandardKey.Undo)
+    QTest.mousePress(dialog._canvas, Qt.MouseButton.LeftButton, pos=QPoint(100, 100))
+    QTest.mouseRelease(dialog._canvas, Qt.MouseButton.LeftButton, pos=QPoint(280, 100))
+    assert len(dialog._canvas.annotations) == 1
+
+    QTest.keyClick(dialog, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+    QApplication.processEvents()
+    assert dialog._canvas.annotations == []
+    dialog.close()
+    dialog.deleteLater()
 
 
 def test_preview_actions_have_one_save_and_no_redundant_open(tmp_path: Path) -> None:
@@ -398,6 +606,38 @@ def test_preview_actions_have_one_save_and_no_redundant_open(tmp_path: Path) -> 
     assert "Save" in buttons
     assert "Open" not in buttons
     assert buttons["Show in folder"].isEnabled() is False
+    dialog.close()
+    dialog.deleteLater()
+
+
+def test_recording_preview_controls_reserve_clear_indicator_space(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(preview_dialog, "QMediaPlayer", None)
+    monkeypatch.setattr(preview_dialog, "QVideoWidget", None)
+    monkeypatch.setattr(preview_dialog, "QAudioOutput", None)
+    recording_path = tmp_path / "preview.mp4"
+    unzoomed_path = tmp_path / "preview-unzoomed.mp4"
+    recording_path.write_bytes(b"placeholder")
+    unzoomed_path.write_bytes(b"placeholder")
+
+    dialog = CapturePreviewDialog(
+        str(recording_path),
+        unzoomed_path=str(unzoomed_path),
+    )
+
+    assert dialog._remove_zoom is not None
+    assert dialog._remove_zoom.objectName() == "removeSmartZoom"
+    assert dialog._format_combo is not None
+    assert dialog._format_combo.objectName() == "recordingFormat"
+    style = dialog.styleSheet()
+    assert "QCheckBox#removeSmartZoom::indicator" in style
+    assert "border: 2px solid #62aaf0" in style
+    assert "QComboBox#recordingFormat::drop-down" in style
+    assert "width: 32px" in style
+    assert "padding: 7px 40px 7px 10px" in style
     dialog.close()
     dialog.deleteLater()
 

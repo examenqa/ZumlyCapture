@@ -14,7 +14,6 @@ WS_EX_TOPMOST = 0x00000008
 WS_EX_TOOLWINDOW = 0x00000080
 WS_POPUP = 0x80000000
 
-LWA_COLORKEY = 1
 WDA_EXCLUDEFROMCAPTURE = 0x00000011
 
 WM_PAINT = 0x000F
@@ -25,17 +24,22 @@ HWND_TOPMOST = -1
 SWP_NOSIZE = 0x0001
 SWP_NOMOVE = 0x0002
 SWP_NOACTIVATE = 0x0010
-NULL_PEN = 8
 BASE_DPI = 96.0
+BI_RGB = 0
+DIB_RGB_COLORS = 0
+ULW_ALPHA = 0x00000002
+AC_SRC_OVER = 0x00
+AC_SRC_ALPHA = 0x01
+ANTIALIAS_GRID = 8
 
 # Hallmark · component: recording status badge · genre: modern-minimal · theme: Cobalt
-# Pre-emit critique: P5 H5 E5 S5 R5 V4
+# Hallmark · pre-emit critique: P5 H5 E5 S5 R5 V4
 BASE_WIDTH = 24
 BASE_HEIGHT = 24
 TOP_OFFSET = 16
-OUTER_CIRCLE = (1, 1, 23, 23)
-RING_CIRCLE = (3, 3, 21, 21)
-DOT_CIRCLE = (7, 7, 17, 17)
+OUTER_RADIUS = 10.5
+RING_RADIUS = 8.75
+DOT_RADIUS = 5.0
 
 # COLORREF values are BGR. The cool neutral edge keeps the near-white ring
 # visible against both light and dark content without growing the badge.
@@ -43,6 +47,39 @@ EDGE_COLOR = 0x002A170F       # RGB(15, 23, 42) / #0F172A
 RING_COLOR = 0x00FCFAF8       # RGB(248, 250, 252) / #F8FAFC
 RECORDING_COLOR = 0x004444EF  # RGB(239, 68, 68) / #EF4444
 PAUSED_COLOR = 0x000B9EF5     # RGB(245, 158, 11) / #F59E0B
+EDGE_ALPHA = 216
+
+
+class BLENDFUNCTION(ctypes.Structure):
+    _fields_ = [
+        ("BlendOp", wintypes.BYTE),
+        ("BlendFlags", wintypes.BYTE),
+        ("SourceConstantAlpha", wintypes.BYTE),
+        ("AlphaFormat", wintypes.BYTE),
+    ]
+
+
+class BITMAPINFOHEADER(ctypes.Structure):
+    _fields_ = [
+        ("biSize", wintypes.DWORD),
+        ("biWidth", wintypes.LONG),
+        ("biHeight", wintypes.LONG),
+        ("biPlanes", wintypes.WORD),
+        ("biBitCount", wintypes.WORD),
+        ("biCompression", wintypes.DWORD),
+        ("biSizeImage", wintypes.DWORD),
+        ("biXPelsPerMeter", wintypes.LONG),
+        ("biYPelsPerMeter", wintypes.LONG),
+        ("biClrUsed", wintypes.DWORD),
+        ("biClrImportant", wintypes.DWORD),
+    ]
+
+
+class BITMAPINFO(ctypes.Structure):
+    _fields_ = [
+        ("bmiHeader", BITMAPINFOHEADER),
+        ("bmiColors", wintypes.DWORD * 3),
+    ]
 
 class WNDCLASSEX(ctypes.Structure):
     _fields_ = [("cbSize", wintypes.UINT),
@@ -99,18 +136,93 @@ user32.InvalidateRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT), 
 user32.InvalidateRect.restype = wintypes.BOOL
 user32.UnregisterClassW.argtypes = [wintypes.LPCWSTR, wintypes.HINSTANCE]
 user32.UnregisterClassW.restype = wintypes.BOOL
+user32.GetDC.argtypes = [wintypes.HWND]
+user32.GetDC.restype = wintypes.HDC
+user32.ReleaseDC.argtypes = [wintypes.HWND, wintypes.HDC]
+user32.ReleaseDC.restype = ctypes.c_int
+user32.ClientToScreen.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.POINT)]
+user32.ClientToScreen.restype = wintypes.BOOL
+user32.UpdateLayeredWindow.argtypes = [
+    wintypes.HWND,
+    wintypes.HDC,
+    ctypes.POINTER(wintypes.POINT),
+    ctypes.POINTER(wintypes.SIZE),
+    wintypes.HDC,
+    ctypes.POINTER(wintypes.POINT),
+    wintypes.COLORREF,
+    ctypes.POINTER(BLENDFUNCTION),
+    wintypes.DWORD,
+]
+user32.UpdateLayeredWindow.restype = wintypes.BOOL
 
 
 # Define GDI argtypes
-gdi32.GetStockObject.argtypes = [ctypes.c_int]
-gdi32.GetStockObject.restype = wintypes.HANDLE
-gdi32.CreateSolidBrush.argtypes = [wintypes.COLORREF]
-gdi32.CreateSolidBrush.restype = wintypes.HBRUSH
 gdi32.SelectObject.argtypes = [wintypes.HDC, wintypes.HANDLE]
 gdi32.SelectObject.restype = wintypes.HANDLE
 gdi32.DeleteObject.argtypes = [wintypes.HANDLE]
 gdi32.DeleteObject.restype = wintypes.BOOL
-gdi32.Ellipse.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int]
+gdi32.CreateCompatibleDC.argtypes = [wintypes.HDC]
+gdi32.CreateCompatibleDC.restype = wintypes.HDC
+gdi32.DeleteDC.argtypes = [wintypes.HDC]
+gdi32.DeleteDC.restype = wintypes.BOOL
+gdi32.CreateDIBSection.argtypes = [
+    wintypes.HDC,
+    ctypes.POINTER(BITMAPINFO),
+    wintypes.UINT,
+    ctypes.POINTER(ctypes.c_void_p),
+    wintypes.HANDLE,
+    wintypes.DWORD,
+]
+gdi32.CreateDIBSection.restype = wintypes.HBITMAP
+
+
+def _colorref_rgb(color: int) -> tuple[int, int, int]:
+    """Convert a Win32 COLORREF into an RGB tuple."""
+    return color & 0xFF, (color >> 8) & 0xFF, (color >> 16) & 0xFF
+
+
+def _render_indicator_pixels(width: int, height: int, paused: bool) -> bytes:
+    """Render a smooth premultiplied-BGRA recording indicator."""
+    scale = min(width, height) / BASE_WIDTH
+    center_x = width / 2.0
+    center_y = height / 2.0
+    outer_radius = OUTER_RADIUS * scale
+    ring_radius = RING_RADIUS * scale
+    dot_radius = DOT_RADIUS * scale
+    dot_color = PAUSED_COLOR if paused else RECORDING_COLOR
+    layers = (
+        (dot_radius * dot_radius, _colorref_rgb(dot_color), 255),
+        (ring_radius * ring_radius, _colorref_rgb(RING_COLOR), 255),
+        (outer_radius * outer_radius, _colorref_rgb(EDGE_COLOR), EDGE_ALPHA),
+    )
+    sample_count = ANTIALIAS_GRID * ANTIALIAS_GRID
+    pixels = bytearray(width * height * 4)
+
+    for y in range(height):
+        for x in range(width):
+            alpha_sum = red_sum = green_sum = blue_sum = 0
+            for sample_y in range(ANTIALIAS_GRID):
+                point_y = y + (sample_y + 0.5) / ANTIALIAS_GRID
+                dy = point_y - center_y
+                for sample_x in range(ANTIALIAS_GRID):
+                    point_x = x + (sample_x + 0.5) / ANTIALIAS_GRID
+                    dx = point_x - center_x
+                    distance_squared = dx * dx + dy * dy
+                    for radius_squared, (red, green, blue), alpha in layers:
+                        if distance_squared <= radius_squared:
+                            alpha_sum += alpha
+                            red_sum += red * alpha
+                            green_sum += green * alpha
+                            blue_sum += blue * alpha
+                            break
+
+            offset = (y * width + x) * 4
+            pixels[offset] = round(blue_sum / (sample_count * 255))
+            pixels[offset + 1] = round(green_sum / (sample_count * 255))
+            pixels[offset + 2] = round(red_sum / (sample_count * 255))
+            pixels[offset + 3] = round(alpha_sum / sample_count)
+
+    return bytes(pixels)
 
 
 def _get_system_scale_factor() -> float:
@@ -162,35 +274,69 @@ class RecordingOverlay:
     def _px(self, value: float) -> int:
         return max(1, int(round(value * self.scale_factor)))
 
-    def _draw_circle(self, hdc, bounds: tuple[int, int, int, int], color: int) -> None:
-        brush = gdi32.CreateSolidBrush(color)
-        old_brush = gdi32.SelectObject(hdc, brush)
-        gdi32.Ellipse(hdc, *(self._px(value) for value in bounds))
-        gdi32.SelectObject(hdc, old_brush)
-        gdi32.DeleteObject(brush)
+    def _present_indicator(self, hwnd, paused: bool) -> None:
+        """Present the antialiased badge through a per-pixel-alpha layer."""
+        screen_dc = user32.GetDC(0)
+        memory_dc = gdi32.CreateCompatibleDC(screen_dc)
+        bitmap = None
+        old_bitmap = None
+        try:
+            bitmap_info = BITMAPINFO()
+            bitmap_info.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
+            bitmap_info.bmiHeader.biWidth = self.width
+            bitmap_info.bmiHeader.biHeight = -self.height
+            bitmap_info.bmiHeader.biPlanes = 1
+            bitmap_info.bmiHeader.biBitCount = 32
+            bitmap_info.bmiHeader.biCompression = BI_RGB
+            bits = ctypes.c_void_p()
+            bitmap = gdi32.CreateDIBSection(
+                screen_dc,
+                ctypes.byref(bitmap_info),
+                DIB_RGB_COLORS,
+                ctypes.byref(bits),
+                None,
+                0,
+            )
+            if not bitmap or not bits.value:
+                return
+            old_bitmap = gdi32.SelectObject(memory_dc, bitmap)
+            pixel_data = _render_indicator_pixels(self.width, self.height, paused)
+            ctypes.memmove(bits, pixel_data, len(pixel_data))
+
+            destination = wintypes.POINT()
+            user32.ClientToScreen(hwnd, ctypes.byref(destination))
+            size = wintypes.SIZE(self.width, self.height)
+            source = wintypes.POINT(0, 0)
+            blend = BLENDFUNCTION(AC_SRC_OVER, 0, 255, AC_SRC_ALPHA)
+            user32.UpdateLayeredWindow(
+                hwnd,
+                screen_dc,
+                ctypes.byref(destination),
+                ctypes.byref(size),
+                memory_dc,
+                ctypes.byref(source),
+                0,
+                ctypes.byref(blend),
+                ULW_ALPHA,
+            )
+        finally:
+            if old_bitmap:
+                gdi32.SelectObject(memory_dc, old_bitmap)
+            if bitmap:
+                gdi32.DeleteObject(bitmap)
+            if memory_dc:
+                gdi32.DeleteDC(memory_dc)
+            if screen_dc:
+                user32.ReleaseDC(0, screen_dc)
 
     def _wndproc(self, hwnd, msg, wparam, lparam):
         if msg == WM_PAINT:
             with self._state_lock:
                 paused = self._paused
             ps = PAINTSTRUCT()
-            hdc = user32.BeginPaint(hwnd, ctypes.byref(ps))
-
-            # Remove black borders globally
-            hpen_null = gdi32.GetStockObject(NULL_PEN)
-            old_pen = gdi32.SelectObject(hdc, hpen_null)
-
-            # Three concentric circles remain legible on any captured content.
-            self._draw_circle(hdc, OUTER_CIRCLE, EDGE_COLOR)
-            self._draw_circle(hdc, RING_CIRCLE, RING_COLOR)
-            self._draw_circle(
-                hdc,
-                DOT_CIRCLE,
-                PAUSED_COLOR if paused else RECORDING_COLOR,
-            )
-            gdi32.SelectObject(hdc, old_pen)
-
+            user32.BeginPaint(hwnd, ctypes.byref(ps))
             user32.EndPaint(hwnd, ctypes.byref(ps))
+            self._present_indicator(hwnd, paused)
             return 0
         elif msg == WM_DESTROY:
             user32.PostQuitMessage(0)
@@ -209,10 +355,7 @@ class RecordingOverlay:
         wndclass.hInstance = kernel32.GetModuleHandleW(None)
         wndclass.lpszClassName = class_name
         
-        # Transparent colorkey background (Magenta)
-        magenta = 0x00FF00FF
-        hbrush = gdi32.CreateSolidBrush(magenta)
-        wndclass.hbrBackground = hbrush
+        wndclass.hbrBackground = None
 
         user32.RegisterClassExW(ctypes.byref(wndclass))
 
@@ -235,7 +378,6 @@ class RecordingOverlay:
             self._ready.set()
             return
 
-        user32.SetLayeredWindowAttributes(self.hwnd, magenta, 0, LWA_COLORKEY)
         user32.SetWindowDisplayAffinity(self.hwnd, WDA_EXCLUDEFROMCAPTURE)
 
         user32.ShowWindow(self.hwnd, SW_SHOWNOACTIVATE)
@@ -259,4 +401,3 @@ class RecordingOverlay:
             self.hwnd = None
         if self._class_name:
             user32.UnregisterClassW(self._class_name, wndclass.hInstance)
-        gdi32.DeleteObject(hbrush)

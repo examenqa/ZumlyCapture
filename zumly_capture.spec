@@ -5,6 +5,9 @@ from zumly_capture.identity import EXECUTABLE_NAME
 
 brand_icon = "zumly/app/branding/generated/zumly.ico"
 app_datas = [
+    ("LICENSE", "."),
+    ("NOTICE.md", "."),
+    ("THIRD_PARTY_NOTICES.md", "."),
     ("zumly/app/branding/*.svg", "zumly/app/branding"),
     ("zumly/app/branding/generated/*", "zumly/app/branding/generated"),
     ("zumly/app/cursors/*", "zumly/app/cursors"),

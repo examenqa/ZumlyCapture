@@ -51,6 +51,7 @@ HOTKEY_RECORD_WINDOW_ID = 9905
 HOTKEY_RECORD_REGION_ID = 9906
 HOTKEY_PAUSE_ID = 9909
 HOTKEY_STOP_ID = 9910
+ERROR_HOTKEY_ALREADY_REGISTERED = 1409
 
 
 def _parse_hotkey(value: str) -> tuple[int, int]:
@@ -93,22 +94,42 @@ class _HotkeyThread(threading.Thread):
         self._shortcuts = dict(shortcuts)
         self._thread_id = 0
         self._ready = threading.Event()
+        self._failures: tuple[tuple[str, str], ...] = ()
+
+    @property
+    def failures(self) -> tuple[tuple[str, str], ...]:
+        """Return shortcuts that could not be registered and a user-facing reason."""
+        return self._failures
 
     def run(self) -> None:
         user32 = ctypes.windll.user32
         kernel32 = ctypes.windll.kernel32
         self._thread_id = kernel32.GetCurrentThreadId()
         registered: list[int] = []
+        failures: list[tuple[str, str]] = []
         for hotkey_id, shortcut in self._shortcuts.items():
             try:
                 modifiers, virtual_key = _parse_hotkey(shortcut)
             except ValueError as exc:
                 logger.warning("Invalid shortcut %s: %s", shortcut, exc)
+                failures.append((shortcut, "Invalid shortcut"))
                 continue
             if user32.RegisterHotKey(None, hotkey_id, modifiers, virtual_key):
                 registered.append(hotkey_id)
             else:
-                logger.warning("Could not register shortcut %s", shortcut)
+                error_code = int(kernel32.GetLastError())
+                reason = (
+                    "Already in use by another app"
+                    if error_code == ERROR_HOTKEY_ALREADY_REGISTERED
+                    else "Could not be registered"
+                )
+                logger.warning(
+                    "Could not register shortcut %s (Windows error %s)",
+                    shortcut,
+                    error_code,
+                )
+                failures.append((shortcut, reason))
+        self._failures = tuple(failures)
         self._ready.set()
 
         message = wintypes.MSG()
@@ -164,6 +185,7 @@ class QtZumlyCaptureTray(QObject):
         self._copy_capture_action: QAction | None = None
         self._reveal_capture_action: QAction | None = None
         self._cursor_zoom_action: QAction | None = None
+        self._hotkey_status_menu: QMenu | None = None
         self._capture_encoder_hint = ""
         self.recording_finished.connect(self._handle_recording_finished)
         self.hotkey_requested.connect(self._handle_hotkey)
@@ -260,6 +282,8 @@ class QtZumlyCaptureTray(QObject):
         brand = QAction(PRODUCT_NAME.upper(), self)
         brand.setEnabled(False)
         menu.addAction(brand)
+        self._hotkey_status_menu = menu.addMenu("Shortcut issues")
+        self._hotkey_status_menu.menuAction().setVisible(False)
         menu.addSeparator()
         self._toggle_action = QAction("Start Recording", self)
         self._toggle_action.triggered.connect(self._on_toggle)
@@ -443,7 +467,33 @@ class QtZumlyCaptureTray(QObject):
         }
         self._hotkey_thread = _HotkeyThread(self._dispatch_hotkey, shortcuts)
         self._hotkey_thread.start()
-        self._hotkey_thread._ready.wait(timeout=2.0)
+        if self._hotkey_thread._ready.wait(timeout=2.0):
+            self._update_hotkey_status(self._hotkey_thread.failures)
+        else:
+            self._update_hotkey_status(
+                (("Global shortcuts", "Registration did not finish"),)
+            )
+
+    def _update_hotkey_status(
+        self,
+        failures: tuple[tuple[str, str], ...],
+    ) -> None:
+        """Expose global-shortcut registration problems in the tray menu."""
+        status_menu = self._hotkey_status_menu
+        if status_menu is None:
+            return
+        status_menu.clear()
+        if not failures:
+            status_menu.menuAction().setVisible(False)
+            return
+
+        count = len(failures)
+        status_menu.setTitle(f"Shortcut issues ({count})")
+        for shortcut, reason in failures:
+            detail = QAction(f"{shortcut} — {reason}", self)
+            detail.setEnabled(False)
+            status_menu.addAction(detail)
+        status_menu.menuAction().setVisible(True)
 
     def _restart_hotkey_thread(self) -> None:
         if self._hotkey_thread is not None:

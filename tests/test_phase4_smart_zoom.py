@@ -20,6 +20,7 @@ from zumly_capture import smart_zoom
 from zumly_capture.smart_zoom import (
     build_click_filter_chain,
     build_cursor_axis_expression,
+    build_cursor_click_scale_expression,
     build_cursor_command_script,
     build_zoompan_filter,
     render_smart_zoom,
@@ -87,6 +88,35 @@ def test_cursor_command_script_avoids_deeply_nested_expressions() -> None:
     assert "*TI" in script
     assert "if(" not in script
     assert "12.000000 overlay@cursor" in script
+
+
+def test_cursor_click_scale_uses_original_zumly_press_and_release_timing() -> None:
+    expression = build_cursor_click_scale_expression(
+        [ClickEvent(x=100, y=200, timestamp=500)]
+    )
+
+    assert "between(t,0.500000,0.634000)" in expression
+    assert "if(lt(t,0.534000),0.900000" in expression
+    assert "clip((t-0.534000)/0.100000,0,1)" in expression
+    assert "1-pow(" in expression
+
+
+def test_cursor_filter_keeps_hotspot_fixed_while_pressing_forward() -> None:
+    graph = smart_zoom._build_filter_graph(
+        [ZoomKeyframe.create(0, 1.0)],
+        [MousePosition(x=100, y=100, timestamp=0)],
+        [ClickEvent(x=100, y=100, timestamp=500)],
+        CAPTURE_RECT,
+        30,
+        True,
+        True,
+        "C:/Temp/cursor.commands",
+    )
+
+    assert "scale=w='max(1,iw*(" in graph
+    assert "eval=frame" in graph
+    assert f"pad={smart_zoom.CURSOR_WIDTH}:{smart_zoom.CURSOR_HEIGHT}:0:0" in graph
+    assert "[commanded][animatedcursor]overlay@cursor" in graph
 
 
 def test_click_filter_chain_renders_every_click() -> None:

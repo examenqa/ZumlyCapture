@@ -1,5 +1,5 @@
 #define MyAppName "Zumly Capture"
-#define MyAppVersion "0.5.4"
+#define MyAppVersion "0.5.5"
 #define MyAppPublisher "Zumly"
 #define MyAppExeName "ZumlyCapture.exe"
 
@@ -26,6 +26,9 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Files]
 Source: "dist\zumly-capture\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "LICENSE"; DestDir: "{app}"; Flags: ignoreversion
+Source: "NOTICE.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"
