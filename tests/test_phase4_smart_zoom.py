@@ -119,6 +119,24 @@ def test_cursor_filter_keeps_hotspot_fixed_while_pressing_forward() -> None:
     assert "[commanded][animatedcursor]overlay@cursor" in graph
 
 
+def test_effects_preserving_output_splits_before_smart_zoom() -> None:
+    graph = smart_zoom._build_filter_graph(
+        [ZoomKeyframe.create(0, 1.5)],
+        [MousePosition(x=100, y=100, timestamp=0)],
+        [ClickEvent(x=100, y=100, timestamp=500)],
+        CAPTURE_RECT,
+        30,
+        True,
+        True,
+        "C:/Temp/cursor.commands",
+        include_unzoomed_output=True,
+    )
+
+    assert "split=2[unzoomed_source][zoom_source]" in graph
+    assert "[unzoomed_source]format=yuv420p[unzoomedv]" in graph
+    assert "[zoom_source]zoompan=" in graph
+
+
 def test_click_filter_chain_renders_every_click() -> None:
     clicks = [ClickEvent(x=100 + index, y=200, timestamp=index * 100) for index in range(9)]
 
@@ -311,6 +329,7 @@ def test_automatic_smart_zoom_can_be_removed_as_one_effect(
 def test_renderer_produces_playable_video_and_reports_progress(tmp_path: Path) -> None:
     source = tmp_path / "source.mp4"
     output = tmp_path / "processed.mp4"
+    effects_only = tmp_path / "effects-only.mp4"
     subprocess.run(
         [
             ffmpeg_exe(),
@@ -360,11 +379,13 @@ def test_renderer_produces_playable_video_and_reports_progress(tmp_path: Path) -
         30,
         render_cursor=True,
         render_clicks=True,
+        unzoomed_output_path=str(effects_only),
         progress_callback=progress.append,
     )
 
     assert result.state == "processed", result.error
     assert output.stat().st_size > 0
+    assert effects_only.stat().st_size > 0
     assert progress[0] == 0
     assert progress[-1] == 100
     subprocess.run(
@@ -375,6 +396,22 @@ def test_renderer_produces_playable_video_and_reports_progress(tmp_path: Path) -
             "error",
             "-i",
             str(output),
+            "-map",
+            "0:a:0",
+            "-f",
+            "null",
+            "-",
+        ],
+        check=True,
+    )
+    subprocess.run(
+        [
+            ffmpeg_exe(),
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            str(effects_only),
             "-map",
             "0:a:0",
             "-f",

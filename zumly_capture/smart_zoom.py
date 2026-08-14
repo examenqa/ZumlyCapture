@@ -419,6 +419,7 @@ def _build_filter_graph(
     render_cursor: bool,
     render_clicks: bool,
     cursor_command_path: str = "",
+    include_unzoomed_output: bool = False,
 ) -> str:
     filters = ["[0:v]setpts=PTS-STARTPTS,format=rgba[base]"]
     current = "base"
@@ -455,6 +456,12 @@ def _build_filter_graph(
             "eval=frame:eof_action=repeat:shortest=1[decorated]"
         )
         current = "decorated"
+    if include_unzoomed_output:
+        filters.append(
+            f"[{current}]split=2[unzoomed_source][zoom_source]"
+        )
+        filters.append("[unzoomed_source]format=yuv420p[unzoomedv]")
+        current = "zoom_source"
     zoompan = build_zoompan_filter(
         keyframes,
         fps,
@@ -487,10 +494,11 @@ def render_smart_zoom(
     zoom_level: float = 1.5,
     render_cursor: bool = False,
     render_clicks: bool = True,
+    unzoomed_output_path: str = "",
     progress_callback: ProgressCallback | None = None,
     cancel_callback: CancelCallback | None = None,
 ) -> SmartZoomResult:
-    """Analyze every click and render Smart Zoom without risking source media."""
+    """Render Smart Zoom and optionally retain a 1x copy with visual effects."""
     keyframes: list[ZoomKeyframe] = []
     cursor_path = ""
     click_ripple_path = ""
@@ -544,25 +552,34 @@ def render_smart_zoom(
             render_cursor,
             render_clicks,
             cursor_command_path,
+            include_unzoomed_output=bool(unzoomed_output_path),
         )
         with open(filter_path, "w", encoding="utf-8") as handle:
             handle.write(graph)
             handle.write("\n")
         command += [
             "-filter_complex_script", filter_path,
-            "-map", "[outv]",
-            "-map", "0:a?",
-            "-c:v", "libx264",
-            "-preset", "veryfast",
-            "-crf", "18",
-            "-pix_fmt", "yuv420p",
-            "-c:a", "copy",
-            "-movflags", "+faststart",
             "-progress", "pipe:1",
             "-stats_period", "0.25",
             "-nostats",
-            output_path,
         ]
+        for output_label, rendered_path in (
+            ("outv", output_path),
+            ("unzoomedv", unzoomed_output_path),
+        ):
+            if not rendered_path:
+                continue
+            command += [
+                "-map", f"[{output_label}]",
+                "-map", "0:a?",
+                "-c:v", "libx264",
+                "-preset", "veryfast",
+                "-crf", "18",
+                "-pix_fmt", "yuv420p",
+                "-c:a", "copy",
+                "-movflags", "+faststart",
+                rendered_path,
+            ]
         process = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,
@@ -584,6 +601,7 @@ def render_smart_zoom(
                     process.kill()
                     process.wait(timeout=3.0)
                 _remove_file(output_path)
+                _remove_file(unzoomed_output_path)
                 return SmartZoomResult(state="cancelled", keyframes=keyframes)
             name, separator, value = raw_line.strip().partition("=")
             if not separator or name not in {"out_time_us", "out_time_ms"}:
@@ -618,8 +636,16 @@ def render_smart_zoom(
                 if progress_callback is not None:
                     progress_callback(progress)
         return_code = process.wait()
-        if return_code != 0 or not os.path.isfile(output_path) or os.path.getsize(output_path) <= 0:
+        expected_outputs = [output_path]
+        if unzoomed_output_path:
+            expected_outputs.append(unzoomed_output_path)
+        outputs_usable = all(
+            os.path.isfile(path) and os.path.getsize(path) > 0
+            for path in expected_outputs
+        )
+        if return_code != 0 or not outputs_usable:
             _remove_file(output_path)
+            _remove_file(unzoomed_output_path)
             signed_code = return_code if return_code < 2**31 else return_code - 2**32
             details = " | ".join(diagnostic_lines)[-4000:]
             message = f"FFmpeg exited with code {signed_code}"
@@ -641,6 +667,7 @@ def render_smart_zoom(
         if process is not None and process.poll() is None:
             process.terminate()
         _remove_file(output_path)
+        _remove_file(unzoomed_output_path)
         return SmartZoomResult(state="failed", keyframes=keyframes, error=str(exc))
     finally:
         _remove_file(cursor_path)

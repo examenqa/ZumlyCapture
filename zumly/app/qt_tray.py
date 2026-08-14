@@ -180,6 +180,8 @@ class QtZumlyCaptureTray(QObject):
         self._recording_tray_icon: QIcon | None = None
         self._paused_tray_icon: QIcon | None = None
         self._toggle_action: QAction | None = None
+        self._recording_menu: QMenu | None = None
+        self._screenshot_menu: QMenu | None = None
         self._pause_action: QAction | None = None
         self._open_capture_action: QAction | None = None
         self._copy_capture_action: QAction | None = None
@@ -243,7 +245,7 @@ class QtZumlyCaptureTray(QObject):
 
         menu = QMenu()
         menu.setObjectName("captureCommandMenu")
-        menu.setMinimumWidth(310)
+        menu.setMinimumWidth(282)
         menu.setStyleSheet(
             """
             QMenu#captureCommandMenu {
@@ -251,14 +253,14 @@ class QtZumlyCaptureTray(QObject):
                 color: #edf4ff;
                 border: 1px solid #3f5067;
                 border-radius: 12px;
-                padding: 9px;
+                padding: 7px;
                 font-size: 13px;
             }
             QMenu#captureCommandMenu::item {
-                min-height: 25px;
-                padding: 7px 18px 7px 14px;
-                margin: 2px 0;
-                border-radius: 7px;
+                min-height: 23px;
+                padding: 5px 15px 5px 12px;
+                margin: 1px 0;
+                border-radius: 6px;
             }
             QMenu#captureCommandMenu::item:selected {
                 background: #356da8;
@@ -268,14 +270,15 @@ class QtZumlyCaptureTray(QObject):
             QMenu#captureCommandMenu::separator {
                 height: 1px;
                 background: #3a4759;
-                margin: 8px 10px;
+                margin: 6px 8px;
             }
             QMenu#captureCommandMenu::indicator { width: 16px; height: 16px; }
             QMenu#captureCommandMenu QMenu {
                 background: #202936;
                 color: #edf4ff;
                 border: 1px solid #3f5067;
-                padding: 8px;
+                border-radius: 9px;
+                padding: 6px;
             }
             """
         )
@@ -288,6 +291,29 @@ class QtZumlyCaptureTray(QObject):
         self._toggle_action = QAction("Start Recording", self)
         self._toggle_action.triggered.connect(self._on_toggle)
         menu.addAction(self._toggle_action)
+        self._toggle_action.setVisible(False)
+
+        self._recording_menu = menu.addMenu("Start Recording")
+        self._recording_menu.setMinimumWidth(236)
+        record_monitor = QAction("Full Monitor", self)
+        record_monitor.setShortcut("Ctrl+Alt+4")
+        record_monitor.triggered.connect(self._record_monitor)
+        self._recording_menu.addAction(record_monitor)
+        record_window = QAction("Choose Window…", self)
+        record_window.setShortcut("Ctrl+Alt+5")
+        record_window.triggered.connect(self._record_window)
+        self._recording_menu.addAction(record_window)
+        record_region = QAction("Select Region…", self)
+        record_region.setShortcut("Ctrl+Alt+6")
+        record_region.triggered.connect(self._record_region)
+        self._recording_menu.addAction(record_region)
+
+        self._cursor_zoom_action = QAction("Automatic Smart Zoom", self)
+        self._cursor_zoom_action.setCheckable(True)
+        self._cursor_zoom_action.setChecked(bool(self._cfg.get("smart_zoom_enabled", True)))
+        self._cursor_zoom_action.triggered.connect(self._toggle_cursor_zoom)
+        self._recording_menu.addSeparator()
+        self._recording_menu.addAction(self._cursor_zoom_action)
 
         self._pause_action = QAction("Pause Recording", self)
         self._pause_action.setShortcut("Ctrl+Alt+9")
@@ -295,40 +321,20 @@ class QtZumlyCaptureTray(QObject):
         self._pause_action.triggered.connect(self._on_pause_toggle)
         menu.addAction(self._pause_action)
 
-        screenshot_menu = menu.addMenu("Take Screenshot")
+        self._screenshot_menu = menu.addMenu("Take Screenshot")
+        self._screenshot_menu.setMinimumWidth(236)
         screenshot_monitor = QAction("Full Monitor", self)
         screenshot_monitor.setShortcut("Ctrl+Alt+1")
         screenshot_monitor.triggered.connect(self._screenshot_monitor)
-        screenshot_menu.addAction(screenshot_monitor)
+        self._screenshot_menu.addAction(screenshot_monitor)
         screenshot_window = QAction("Active Window", self)
         screenshot_window.setShortcut("Ctrl+Alt+2")
         screenshot_window.triggered.connect(self._screenshot_active_window)
-        screenshot_menu.addAction(screenshot_window)
+        self._screenshot_menu.addAction(screenshot_window)
         screenshot_region = QAction("Select Region", self)
         screenshot_region.setShortcut("Ctrl+Alt+3")
         screenshot_region.triggered.connect(self._screenshot_region)
-        screenshot_menu.addAction(screenshot_region)
-
-        recording_menu = menu.addMenu("Record")
-        record_monitor = QAction("Full Monitor", self)
-        record_monitor.setShortcut("Ctrl+Alt+4")
-        record_monitor.triggered.connect(self._record_monitor)
-        recording_menu.addAction(record_monitor)
-        record_window = QAction("Choose Window…", self)
-        record_window.setShortcut("Ctrl+Alt+5")
-        record_window.triggered.connect(self._record_window)
-        recording_menu.addAction(record_window)
-        record_region = QAction("Select Region…", self)
-        record_region.setShortcut("Ctrl+Alt+6")
-        record_region.triggered.connect(self._record_region)
-        recording_menu.addAction(record_region)
-
-        self._cursor_zoom_action = QAction("Automatic Smart Zoom", self)
-        self._cursor_zoom_action.setCheckable(True)
-        self._cursor_zoom_action.setChecked(bool(self._cfg.get("smart_zoom_enabled", True)))
-        self._cursor_zoom_action.triggered.connect(self._toggle_cursor_zoom)
-        recording_menu.addSeparator()
-        recording_menu.addAction(self._cursor_zoom_action)
+        self._screenshot_menu.addAction(screenshot_region)
 
         menu.addSeparator()
         self._open_capture_action = QAction("Open Last Capture", self)
@@ -1151,6 +1157,9 @@ class QtZumlyCaptureTray(QObject):
                 RecordingState.STOPPING,
                 RecordingState.PROCESSING,
             }
+            self._toggle_action.setVisible(active)
+            if self._recording_menu is not None:
+                self._recording_menu.menuAction().setVisible(not active)
             if self._state == RecordingState.PROCESSING:
                 self._toggle_action.setText("Cancel Processing")
             else:

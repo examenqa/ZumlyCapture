@@ -320,6 +320,56 @@ def test_tray_menu_lists_shortcut_registration_issues() -> None:
     tray.deleteLater()
 
 
+def test_tray_menu_has_compact_aligned_capture_mode_submenus() -> None:
+    app = QApplication.instance() or QApplication([])
+    tray = QtZumlyCaptureTray(app)
+    tray._initialize_tray_ui()
+
+    assert tray._tray_icon is not None
+    menu = tray._tray_icon.contextMenu()
+    assert menu is not None
+    assert menu.minimumWidth() == 282
+
+    assert tray._screenshot_menu is not None
+    assert tray._recording_menu is not None
+    screenshot_menu = tray._screenshot_menu
+    recording_menu = tray._recording_menu
+
+    assert screenshot_menu.minimumWidth() == 236
+    assert recording_menu.minimumWidth() == 236
+    assert [action.text() for action in screenshot_menu.actions()] == [
+        "Full Monitor",
+        "Active Window",
+        "Select Region",
+    ]
+    assert [action.shortcut().toString() for action in screenshot_menu.actions()] == [
+        "Ctrl+Alt+1",
+        "Ctrl+Alt+2",
+        "Ctrl+Alt+3",
+    ]
+    assert [action.text() for action in recording_menu.actions() if not action.isSeparator()] == [
+        "Full Monitor",
+        "Choose Window…",
+        "Select Region…",
+        "Automatic Smart Zoom",
+    ]
+    assert not any(action.text() == "Record" for action in menu.actions())
+
+    assert tray._toggle_action is not None
+    assert tray._toggle_action.isVisible() is False
+    tray._state = qt_tray.RecordingState.RECORDING
+    tray._update_tray("Recording")
+    assert tray._toggle_action.isVisible() is True
+    assert tray._toggle_action.text() == "Stop Recording"
+    assert recording_menu.menuAction().isVisible() is False
+
+    tray._state = qt_tray.RecordingState.IDLE
+    tray._update_tray("Ready")
+    assert tray._toggle_action.isVisible() is False
+    assert recording_menu.menuAction().isVisible() is True
+    tray.deleteLater()
+
+
 def test_number_hotkeys_route_to_all_capture_actions() -> None:
     calls: list[str] = []
 

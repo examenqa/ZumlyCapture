@@ -482,6 +482,7 @@ def _run(args: argparse.Namespace) -> int:
 
         source_before_render = publication_source
         render_path = ""
+        effects_only_path = ""
         try:
             smart_zoom_progress(0)
             render_handle = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
@@ -491,6 +492,22 @@ def _run(args: argparse.Namespace) -> int:
                 os.remove(render_path)
             except OSError:
                 pass
+            preserve_unzoomed = bool(getattr(args, "preserve_unzoomed", False))
+            needs_effects_only_copy = preserve_unzoomed and (
+                bool(args.render_cursor and mouse_events)
+                or bool(args.render_clicks and click_events)
+            )
+            if needs_effects_only_copy:
+                effects_handle = tempfile.NamedTemporaryFile(
+                    suffix=".mp4",
+                    delete=False,
+                )
+                effects_only_path = effects_handle.name
+                effects_handle.close()
+                try:
+                    os.remove(effects_only_path)
+                except OSError:
+                    pass
             outcome = render_smart_zoom(
                 source_before_render,
                 render_path,
@@ -502,6 +519,7 @@ def _run(args: argparse.Namespace) -> int:
                 zoom_level=smart_zoom_level,
                 render_cursor=bool(args.render_cursor),
                 render_clicks=bool(args.render_clicks),
+                unzoomed_output_path=effects_only_path,
                 progress_callback=smart_zoom_progress,
                 cancel_callback=smart_zoom_cancelled,
             )
@@ -515,10 +533,10 @@ def _run(args: argparse.Namespace) -> int:
             if outcome.error:
                 smart_zoom_manifest["error"] = outcome.error
             if outcome.state == "processed" and outcome.output_path:
-                if bool(getattr(args, "preserve_unzoomed", False)):
+                if preserve_unzoomed:
                     try:
                         unzoomed_path = preserve_unzoomed_recording(
-                            source_before_render,
+                            effects_only_path or source_before_render,
                             session_id,
                         )
                     except Exception as exc:
@@ -558,6 +576,12 @@ def _run(args: argparse.Namespace) -> int:
             }
             warnings.append("Smart Zoom could not be applied; the unprocessed recording was saved.")
             logging.exception("Smart Zoom orchestration failed; preserving source video: %s", exc)
+        finally:
+            if effects_only_path:
+                try:
+                    os.remove(effects_only_path)
+                except OSError:
+                    pass
 
     if output_format == "gif":
         gif_handle = tempfile.NamedTemporaryFile(suffix=".gif", delete=False)
